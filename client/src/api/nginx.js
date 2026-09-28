@@ -75,3 +75,6 @@ export const deleteSiteBackup = (name, file) =>
   request.delete(`/nginx/sites/${encodeURIComponent(name)}/backups`, { params: { file } });
 export const enableSiteLog = (name) =>
   request.post(`/nginx/sites/${encodeURIComponent(name)}/traffic/log`, {}, { timeout: 30000 });
+// 存量 PHP 站点配置目录隔离（open_basedir 注入），新建 PHP 站点已自动写入
+export const enableSiteOpenBasedir = (name) =>
+  request.post(`/nginx/sites/${encodeURIComponent(name)}/open-basedir`, {}, { timeout: 30000 });

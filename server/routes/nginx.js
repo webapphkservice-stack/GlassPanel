@@ -207,6 +207,18 @@ router.post('/sites/:name/traffic/log', async (req, res, next) => {
   }
 });
 
+// 存量 PHP 站点配置目录隔离（向 fastcgi 块注入 open_basedir 并重载 Nginx），新建 PHP 站点已自动写入
+router.post('/sites/:name/open-basedir', async (req, res, next) => {
+  try {
+    const result = await nginx.enableSiteOpenBasedir(req.params.name);
+    store.addLog(req.user.username, 'nginx_site_enable_open_basedir', result.file);
+    res.json({ success: true, output: result });
+  } catch (err) {
+    logger.error('Nginx enable site open_basedir failed', { error: err.message });
+    next(err);
+  }
+});
+
 // —— 站点备份：网站目录 + 站点配置文件（恢复前会校验包内路径） ——
 
 router.get('/sites/:name/backups', async (req, res, next) => {

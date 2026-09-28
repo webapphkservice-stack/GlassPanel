@@ -13,6 +13,7 @@ import {
   deleteNginxSite,
   stopNginxSite,
   restartNginxSite,
+  enableSiteOpenBasedir,
   getProvisionStatus,
 } from '@/api/nginx';
 import GlassCard from '@/components/common/GlassCard';
@@ -296,6 +297,32 @@ export default function Nginx() {
     }
   }
 
+  // 存量 PHP 站点配置目录隔离：向配置注入 open_basedir 并重载，限制 PHP 只能读写本站点目录与 /tmp
+  async function handleEnableIsolation(site) {
+    const label = site.serverName || site.name;
+    const ok = await uiConfirm({
+      title: t('nginx.enableIsolation'),
+      message: t('nginx.enableIsolationConfirm', { name: label, root: site.root }),
+      confirmText: t('nginx.enableIsolation'),
+    });
+    if (!ok) return;
+    setActingSite(site.name);
+    try {
+      const data = await enableSiteOpenBasedir(site.name);
+      toast(
+        data?.output?.injected === false
+          ? t('nginx.isolationExists')
+          : t('nginx.isolationDone', { name: label, dir: data?.output?.openBasedir || '' }),
+        'success'
+      );
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    } finally {
+      await fetchSites();
+      setActingSite('');
+    }
+  }
+
   async function handleTest() {
     try {
       const data = await testNginxConfig();
@@ -478,7 +505,27 @@ export default function Nginx() {
                     <td className="py-3 text-white/70">{site.root || site.proxyPass || '-'}</td>
                     <td className="py-3">
                       {site.phpVersion ? (
-                        <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-xs text-indigo-300">PHP {site.phpVersion}</span>
+                        <span className="flex flex-wrap items-center gap-2">
+                          <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-xs text-indigo-300">PHP {site.phpVersion}</span>
+                          {site.isolated ? (
+                            <span
+                              title={t('nginx.isolationOnHint')}
+                              className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-300"
+                            >
+                              {t('nginx.isolated')}
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleEnableIsolation(site)}
+                              disabled={site.enabled === false || actingSite === site.name}
+                              title={t('nginx.isolationOffHint')}
+                              className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              {actingSite === site.name ? t('nginx.acting') : t('nginx.notIsolated')}
+                            </button>
+                          )}
+                        </span>
                       ) : (
                         <span className="text-white/40">-</span>
                       )}

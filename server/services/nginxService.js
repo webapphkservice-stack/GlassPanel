@@ -22,6 +22,9 @@ const STOP_PAGE_HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-
 // （fail2banService.siteLogLines），两处写入同一行内容，重复注入时互相幂等
 const NGINX_LOG_DIR = '/var/log/nginx';
 
+// 站点根目录约定：面板创建的站点目录位于 /var/www 下，目录隔离以此为边界
+const WEB_ROOT = '/var/www';
+
 function siteLogLines(siteName) {
   return [
     `    access_log ${NGINX_LOG_DIR}/${siteName}.access.log main;`,
@@ -165,6 +168,8 @@ function parseServerBlocks(stdout, siteDir, fpmByListen = new Map()) {
       type: proxyPass ? 'proxy' : (fpmListen ? 'php' : 'html'),
       ssl: /ssl/.test(block.text),
       stopped: stopPageFiles.has(file),
+      // 是否已由面板注入目录隔离（open_basedir 通过 PHP_ADMIN_VALUE 下发）
+      isolated: /PHP_ADMIN_VALUE[^;]*open_basedir=/.test(block.text),
     };
 
     const key = `${file}|${serverName}`;
@@ -184,6 +189,7 @@ function parseServerBlocks(stdout, siteDir, fpmByListen = new Map()) {
     if (exist.type === 'html' && site.type !== 'html') exist.type = site.type;
     exist.ssl = exist.ssl || site.ssl;
     exist.stopped = exist.stopped || site.stopped;
+    exist.isolated = exist.isolated || site.isolated;
   }
   return merged;
 }
@@ -221,6 +227,7 @@ function parseConfigText(text, file, fpmByListen = new Map()) {
     type: proxyPass ? 'proxy' : (fpmListen ? 'php' : 'html'),
     ssl: /\bssl\b/.test(text),
     stopped: text.includes(STOP_PAGE_MARK),
+    isolated: /PHP_ADMIN_VALUE[^;]*open_basedir=/.test(text),
   };
 }
 
@@ -291,6 +298,32 @@ async function findDomainConflict(domain, selfName, ports) {
   return null;
 }
 
+// open_basedir 允许的路径集合：站点自身目录树 + /tmp。
+// 取 /var/www 下的一级目录而不是 nginx 的 root，是为了覆盖「运行目录」场景
+// （root 指向 public 等子目录时框架仍要读上级）；兄弟站点是同级目录，不会被放行。
+// root 不在 /var/www 下时退回 root 自身
+function openBasedirValue(root) {
+  const raw = String(root || '').trim();
+  if (!raw) return '';
+  const base = path.resolve(raw);
+  const rel = path.relative(WEB_ROOT, base);
+  const siteDir = (rel && !rel.startsWith('..') && !path.isAbsolute(rel))
+    ? path.join(WEB_ROOT, rel.split(path.sep)[0])
+    : base;
+  const allow = [`${siteDir}/`];
+  if (siteDir !== base) allow.push('$document_root/');
+  allow.push('/tmp/');
+  return allow.join(':');
+}
+
+// 用 nginx 下发 open_basedir：PHP_ADMIN_VALUE 属 admin 级设置，优先级高于站点目录下的
+// .user.ini。相比宝塔落盘 .user.ini 的方案，既没有 user_ini 缓存延迟（默认 300s），
+// 站内放置 .user.ini 也无法把它放宽 —— 后者只有在文件被 chattr +i 锁定时才安全
+function openBasedirParam(root) {
+  const value = openBasedirValue(root);
+  return value ? `        fastcgi_param PHP_ADMIN_VALUE "open_basedir=${value}";` : '';
+}
+
 // siteBody：生成 server 块内部主体行（反代或静态/PHP 根目录），供 HTTP 与 HTTPS 两种 server 块共用
 function buildSiteBodyLines({ root, proxyPass, rewrite, type, fpmListen, logName }) {
   const lines = [];
@@ -324,6 +357,8 @@ function buildSiteBodyLines({ root, proxyPass, rewrite, type, fpmListen, logName
       lines.push(`        fastcgi_pass ${fpmListen};`);
       lines.push('        fastcgi_index index.php;');
       lines.push('        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;');
+      const isolation = openBasedirParam(root);
+      if (isolation) lines.push(isolation);
       lines.push('        include fastcgi_params;');
       lines.push('    }');
     }
@@ -376,6 +411,88 @@ async function enableSiteLog(siteName) {
     file: site.file,
     injected: true,
     injectedLines: missing.map((l) => l.trim()),
+    backup: backupPath,
+    reloaded: reload.exitCode === 0,
+  };
+}
+
+// 定位配置里所有 PHP 处理块的范围，返回 [起始下标, 结束下标) 列表。
+// 用花括号配对取块，避免块内出现嵌套 `if` 时被截断
+function findPhpLocationRanges(text) {
+  const ranges = [];
+  const re = /location\s+~\s+\\\.php\$\s*\{/g;
+  let hit;
+  while ((hit = re.exec(text)) !== null) {
+    const open = hit.index + hit[0].length - 1;
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < text.length; i += 1) {
+      if (text[i] === '{') depth += 1;
+      else if (text[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+    if (end < 0) break; // 花括号不配对，放弃后续解析
+    ranges.push([hit.index, end]);
+    re.lastIndex = end;
+  }
+  return ranges;
+}
+
+// 为存量 PHP 站点补写目录隔离：向 siteBody 写入的位置（fastcgi_pass 之后）注入同一行，
+// 已注入的文件不重复写；写前备份，校验失败回滚
+async function enableSiteOpenBasedir(siteName) {
+  const key = String(siteName || '').trim();
+  if (!SITE_NAME_RE.test(key)) throw new Error('非法站点名称');
+  const site = (await listSites()).find((item) => item.name === key);
+  if (!site || !site.file) throw new Error('站点不存在');
+  if (site.type !== 'php') throw new Error('仅 PHP 站点需要目录隔离，静态与反向代理站点不经过 PHP-FPM');
+  // 已停止的站点配置未被 nginx 加载，此时写入不会生效
+  if (site.enabled === false) throw new Error('站点已停止，请先重启站点再配置目录隔离');
+  if (!site.root) throw new Error('站点未配置网站根目录，无法生成目录隔离配置');
+
+  const line = openBasedirParam(site.root);
+  if (!line) throw new Error('站点未配置网站根目录，无法生成目录隔离配置');
+
+  const original = await fs.promises.readFile(site.file, 'utf8');
+  // 从后往前插入，保证前面块的下标不因插入而失效
+  const ranges = findPhpLocationRanges(original).reverse();
+  let out = original;
+  let injected = 0;
+  for (const [start, end] of ranges) {
+    const block = out.slice(start, end);
+    if (/PHP_ADMIN_VALUE[^;]*open_basedir=/.test(block)) continue;
+    const anchor = /[ \t]*fastcgi_pass[^\n]*\n/.exec(block);
+    const at = anchor
+      ? start + anchor.index + anchor[0].length
+      : out.indexOf('\n', start) + 1;
+    out = `${out.slice(0, at)}${line}\n${out.slice(at)}`;
+    injected += 1;
+  }
+  if (injected === 0) {
+    return { file: site.file, injected: false, injectedLines: [], reloaded: false };
+  }
+
+  const backupPath = `${site.file}.${Date.now()}.bak`;
+  await fs.promises.writeFile(backupPath, original, 'utf8');
+  await fs.promises.writeFile(site.file, out, 'utf8');
+
+  const test = await run('nginx', ['-t']);
+  if (test.exitCode !== 0) {
+    await fs.promises.writeFile(site.file, original, 'utf8');
+    await fs.promises.unlink(backupPath).catch(() => {});
+    throw new Error(`配置校验失败，已回滚：${(test.stderr || test.stdout || '').trim()}`);
+  }
+  const reload = await run('systemctl', ['reload', servicesConfig.service]);
+  return {
+    file: site.file,
+    injected: true,
+    injectedLines: [line.trim()],
+    openBasedir: openBasedirValue(site.root),
     backup: backupPath,
     reloaded: reload.exitCode === 0,
   };
@@ -991,6 +1108,7 @@ module.exports = {
   readConfig,
   writeConfig,
   enableSiteLog,
+  enableSiteOpenBasedir,
   buildSiteConfig,
   buildDefaultPage,
   NGINX_LOG_DIR,
