@@ -35,3 +35,10 @@ export const downloadSiteFile = (name, path) =>
   });
 export const deleteSiteFile = (name, path) =>
   request.delete(`/nginx/sites/${encodeURIComponent(name)}/files`, { params: { path } });
+// 解压压缩包可能耗时较长，单独放宽超时；dest 留空由服务端按压缩包名推导默认目录
+export const extractSiteFile = (name, path, dest = '') =>
+  request.post(
+    `/nginx/sites/${encodeURIComponent(name)}/files/extract`,
+    { path, dest },
+    { timeout: 600000 }
+  );

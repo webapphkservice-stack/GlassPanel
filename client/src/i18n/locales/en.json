@@ -286,7 +286,13 @@
       "modified": "Modified",
       "actions": "Actions",
       "empty": "Folder is empty",
-      "hint": "All operations are restricted to this site's document root; max upload size is 500MB per file."
+      "hint": "All operations are restricted to this site's document root; max upload size is 500MB per file. In-browser extraction supports .zip and .tar / .tar.gz / .tar.bz2 / .tar.xz.",
+      "extract": "Extract",
+      "extractDestLabel": "Extract to",
+      "extractHint": "Target folder must not exist or be empty. Archive paths are validated first; archives containing path traversal or symlinks are rejected.",
+      "extracting": "Extracting…",
+      "extractDone": "Extracted {count} entries to /{path}",
+      "extractFailed": "Extraction failed: {error}"
     },
     "yes": "Yes"
   },

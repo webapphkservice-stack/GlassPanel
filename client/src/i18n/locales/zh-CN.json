@@ -276,7 +276,13 @@
       "modified": "修改时间",
       "actions": "操作",
       "empty": "目录为空",
-      "hint": "所有操作仅限该站点根目录内的文件；单文件上传上限 500MB。"
+      "hint": "所有操作仅限该站点根目录内的文件；单文件上传上限 500MB。支持在线解压 .zip 与 .tar / .tar.gz / .tar.bz2 / .tar.xz。",
+      "extract": "解压",
+      "extractDestLabel": "解压到",
+      "extractHint": "目标目录需不存在或为空；解压前会校验压缩包内路径，含越级路径或符号链接的压缩包将被拒绝。",
+      "extracting": "解压中…",
+      "extractDone": "已解压 {count} 个条目到 /{path}",
+      "extractFailed": "解压失败：{error}"
     },
     "yes": "Yes"
   },

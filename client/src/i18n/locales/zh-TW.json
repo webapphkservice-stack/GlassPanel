@@ -276,7 +276,13 @@
       "modified": "修改時間",
       "actions": "操作",
       "empty": "目錄為空",
-      "hint": "所有操作僅限該站台根目錄內的檔案；單一檔案上傳上限 500MB。"
+      "hint": "所有操作僅限該站台根目錄內的檔案；單一檔案上傳上限 500MB。支援線上解壓 .zip 與 .tar / .tar.gz / .tar.bz2 / .tar.xz。",
+      "extract": "解壓",
+      "extractDestLabel": "解壓至",
+      "extractHint": "目標目錄需不存在或為空；解壓前會校驗壓縮檔內路徑，含越級路徑或符號連結的壓縮檔將被拒絕。",
+      "extracting": "解壓中…",
+      "extractDone": "已解壓 {count} 個項目到 /{path}",
+      "extractFailed": "解壓失敗：{error}"
     },
     "yes": "是"
   },

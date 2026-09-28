@@ -10,8 +10,9 @@ import {
   uploadSiteFile,
   downloadSiteFile,
   deleteSiteFile,
+  extractSiteFile,
 } from '@/api/nginx';
-import { Upload, Download, Folder, FolderOpen, File, Home, Plus, RefreshCw, Trash2 } from '@/components/common/Icons';
+import { Upload, Download, Folder, FolderOpen, File, Home, Plus, RefreshCw, Trash2, Package } from '@/components/common/Icons';
 import { useUIStore } from '@/components/common/uiStore';
 
 function joinPath(dir, name) {
@@ -31,6 +32,12 @@ function formatSize(bytes) {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[i]}`;
 }
 
+// 与服务端一致：去掉压缩包扩展名作为默认解压目录名
+function defaultExtractDest(dir, name) {
+  const base = name.replace(/\.(tar\.(gz|bz2|xz)|tgz|tbz2?|txz|zip|tar)$/i, '') || 'extracted';
+  return joinPath(dir, base);
+}
+
 export default function SiteFileBrowser({ site, onClose }) {
   const { t, i18n } = useTranslation();
   const toast = useUIStore((s) => s.toast);
@@ -41,6 +48,9 @@ export default function SiteFileBrowser({ site, onClose }) {
   const [uploading, setUploading] = useState('');
   const [newDirName, setNewDirName] = useState('');
   const [creatingDir, setCreatingDir] = useState(false);
+  const [extractTarget, setExtractTarget] = useState('');
+  const [extractDest, setExtractDest] = useState('');
+  const [extracting, setExtracting] = useState(false);
   const fileInputRef = useRef(null);
   const open = Boolean(site);
 
@@ -48,6 +58,7 @@ export default function SiteFileBrowser({ site, onClose }) {
     if (site) {
       setDir('');
       setNewDirName('');
+      setExtractTarget('');
     }
   }, [site?.name]);
 
@@ -72,6 +83,7 @@ export default function SiteFileBrowser({ site, onClose }) {
   }, [open, site?.name]);
 
   async function navigate(nextDir) {
+    setExtractTarget('');
     setLoading(true);
     await fetchList(nextDir);
   }
@@ -156,6 +168,30 @@ export default function SiteFileBrowser({ site, onClose }) {
       toast(err?.message || String(err), 'error');
     } finally {
       setCreatingDir(false);
+    }
+  }
+
+  function openExtract(entry) {
+    setExtractTarget(entry.name);
+    setExtractDest(defaultExtractDest(dir, entry.name));
+  }
+
+  async function handleExtract() {
+    const entry = entries.find((e) => e.name === extractTarget);
+    if (!entry) return;
+    setExtracting(true);
+    try {
+      const result = await extractSiteFile(site.name, joinPath(dir, entry.name), extractDest.trim());
+      toast(
+        t('nginx.files.extractDone', { count: result.entries, path: result.path || '/' }),
+        'success'
+      );
+      setExtractTarget('');
+      await fetchList();
+    } catch (err) {
+      toast(t('nginx.files.extractFailed', { error: err?.message || String(err) }), 'error');
+    } finally {
+      setExtracting(false);
     }
   }
 
@@ -289,53 +325,109 @@ export default function SiteFileBrowser({ site, onClose }) {
                   </tr>
                 )}
                 {entries.map((entry) => (
-                  <tr key={entry.name} className="border-b border-white/5 last:border-0 hover:bg-white/[0.03]">
-                    <td className="px-4 py-2.5">
-                      {entry.type === 'dir' ? (
-                        <button
-                          type="button"
-                          onClick={() => navigate(joinPath(dir, entry.name))}
-                          disabled={loading || Boolean(uploading)}
-                          className="flex items-center gap-2 text-cyan-300 hover:underline disabled:opacity-50"
-                        >
-                          <FolderOpen className="w-4 h-4 flex-none text-amber-300/90" />
-                          <span className="truncate">{entry.name}</span>
-                        </button>
-                      ) : (
-                        <span className="flex items-center gap-2 text-white/85">
-                          <File className="w-4 h-4 flex-none text-white/40" />
-                          <span className="truncate" title={entry.name}>{entry.name}</span>
-                          {entry.type === 'link' && <span className="text-xs text-white/40">→ link</span>}
-                        </span>
-                      )}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-2.5 text-white/50">
-                      {entry.type === 'dir' ? '-' : formatSize(entry.size)}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-2.5 text-white/50">
-                      {entry.mtime ? new Date(entry.mtime).toLocaleString(locale) : '-'}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <div className="flex items-center justify-end gap-2">
-                        {entry.type === 'file' && (
+                  <React.Fragment key={entry.name}>
+                    <tr className="border-b border-white/5 last:border-0 hover:bg-white/[0.03]">
+                      <td className="px-4 py-2.5">
+                        {entry.type === 'dir' ? (
                           <button
                             type="button"
-                            onClick={() => handleDownload(entry)}
-                            className="rounded-full border border-white/15 bg-white/5 p-1.5 text-white/70 transition-colors hover:bg-white/15 hover:text-white"
+                            onClick={() => navigate(joinPath(dir, entry.name))}
+                            disabled={loading || Boolean(uploading)}
+                            className="flex items-center gap-2 text-cyan-300 hover:underline disabled:opacity-50"
                           >
-                            <Download className="w-3.5 h-3.5" />
+                            <FolderOpen className="w-4 h-4 flex-none text-amber-300/90" />
+                            <span className="truncate">{entry.name}</span>
                           </button>
+                        ) : (
+                          <span className="flex items-center gap-2 text-white/85">
+                            <File className="w-4 h-4 flex-none text-white/40" />
+                            <span className="truncate" title={entry.name}>{entry.name}</span>
+                            {entry.type === 'link' && <span className="text-xs text-white/40">→ link</span>}
+                          </span>
                         )}
-                        <button
-                          type="button"
-                          onClick={() => handleDelete(entry)}
-                          className="rounded-full border border-rose-500/30 bg-rose-500/10 p-1.5 text-rose-300 transition-colors hover:bg-rose-500/20"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-2.5 text-white/50">
+                        {entry.type === 'dir' ? '-' : formatSize(entry.size)}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-2.5 text-white/50">
+                        {entry.mtime ? new Date(entry.mtime).toLocaleString(locale) : '-'}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex items-center justify-end gap-2">
+                          {entry.type === 'file' && (
+                            <button
+                              type="button"
+                              onClick={() => handleDownload(entry)}
+                              className="rounded-full border border-white/15 bg-white/5 p-1.5 text-white/70 transition-colors hover:bg-white/15 hover:text-white"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          {entry.archive && (
+                            <button
+                              type="button"
+                              onClick={() => (extractTarget === entry.name ? setExtractTarget('') : openExtract(entry))}
+                              disabled={loading || Boolean(uploading) || extracting}
+                              title={t('nginx.files.extract')}
+                              className="rounded-full border border-emerald-500/30 bg-emerald-500/10 p-1.5 text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-40"
+                            >
+                              <Package className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(entry)}
+                            className="rounded-full border border-rose-500/30 bg-rose-500/10 p-1.5 text-rose-300 transition-colors hover:bg-rose-500/20"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    {extractTarget === entry.name && (
+                      <tr className="border-b border-white/5 bg-white/[0.04]">
+                        <td colSpan={4} className="px-4 py-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="whitespace-nowrap text-xs text-white/60">
+                              {t('nginx.files.extractDestLabel')}
+                            </span>
+                            <input
+                              value={extractDest}
+                              onChange={(e) => setExtractDest(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleExtract();
+                                }
+                                if (e.key === 'Escape') {
+                                  e.preventDefault();
+                                  setExtractTarget('');
+                                }
+                              }}
+                              autoFocus
+                              className="min-w-[200px] flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-sm outline-none focus:border-cyan-400"
+                            />
+                            <LiquidButton
+                              onClick={handleExtract}
+                              disabled={extracting}
+                              className="!px-4 !py-1.5 !text-xs"
+                            >
+                              {extracting ? t('nginx.files.extracting') : t('common.confirm')}
+                            </LiquidButton>
+                            <button
+                              type="button"
+                              onClick={() => setExtractTarget('')}
+                              disabled={extracting}
+                              className="rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white/70 transition-colors hover:bg-white/10 disabled:opacity-40"
+                            >
+                              {t('common.cancel')}
+                            </button>
+                          </div>
+                          <p className="mt-1.5 text-xs text-white/40">{t('nginx.files.extractHint')}</p>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
                 ))}
               </tbody>
             </table>

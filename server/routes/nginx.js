@@ -130,6 +130,26 @@ router.delete('/sites/:name/files', async (req, res, next) => {
   }
 });
 
+// 解压站点内的压缩包（.zip / .tar / .tar.gz / .tar.bz2 / .tar.xz）
+// dest 省略时解压到压缩包同目录下的同名文件夹；解压耗时可能较长，超时与上传保持一致
+router.post('/sites/:name/files/extract', async (req, res, next) => {
+  try {
+    const result = await siteFiles.extractArchive(
+      req.params.name,
+      String(req.body?.path || ''),
+      String(req.body?.dest || '')
+    );
+    store.addLog(
+      req.user.username,
+      'nginx_site_file_extract',
+      `${req.params.name}:/${result.archive} -> /${result.path}`
+    );
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.delete('/sites/:name', async (req, res, next) => {
   try {
     const result = await nginx.deleteSite(req.params.name);
