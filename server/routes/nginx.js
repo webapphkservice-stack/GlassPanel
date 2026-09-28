@@ -2,6 +2,8 @@ const express = require('express');
 const nginx = require('../services/nginxService');
 const siteFiles = require('../services/siteFileService');
 const provision = require('../services/provisionTracker');
+const siteTraffic = require('../services/siteTrafficService');
+const siteBackups = require('../services/siteBackupService');
 const fail2ban = require('../services/fail2banService');
 const store = require('../models/store');
 const logger = require('../utils/logger');
@@ -178,6 +180,108 @@ router.post('/sites/:name/files/extract', async (req, res, next) => {
     );
     res.json({ success: true, ...result });
   } catch (err) {
+    next(err);
+  }
+});
+
+// —— 站点流量：读取站点独立访问日志，按小时聚合最近 24 小时 ——
+
+router.get('/sites/:name/traffic', async (req, res, next) => {
+  try {
+    const result = await siteTraffic.getTraffic(req.params.name, req.query.hours);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 存量站点启用独立访问日志（会写入站点配置并重载 Nginx），新建站点已自动写入
+router.post('/sites/:name/traffic/log', async (req, res, next) => {
+  try {
+    const result = await nginx.enableSiteLog(req.params.name);
+    store.addLog(req.user.username, 'nginx_site_enable_log', result.file);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    logger.error('Nginx enable site log failed', { error: err.message });
+    next(err);
+  }
+});
+
+// —— 站点备份：网站目录 + 站点配置文件（恢复前会校验包内路径） ——
+
+router.get('/sites/:name/backups', async (req, res, next) => {
+  try {
+    const result = await siteBackups.listBackups(req.params.name);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/sites/:name/backups', async (req, res, next) => {
+  try {
+    const result = await siteBackups.createBackup(req.params.name);
+    store.addLog(req.user.username, 'nginx_site_backup_create', `${req.params.name}:${result.file}`);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/sites/:name/backups/download', async (req, res, next) => {
+  try {
+    const { absPath, filename } = await siteBackups.resolveForDownload(
+      req.params.name,
+      String(req.query.file || '')
+    );
+    store.addLog(req.user.username, 'nginx_site_backup_download', `${req.params.name}:${filename}`);
+    res.download(absPath, filename);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 恢复会覆盖网站目录与站点配置，前端已做二次确认，这里再校验包内条目与配置语法
+router.post('/sites/:name/backups/restore', async (req, res, next) => {
+  try {
+    const result = await siteBackups.restoreBackup(req.params.name, String(req.body?.file || ''));
+    store.addLog(req.user.username, 'nginx_site_backup_restore', `${req.params.name}:${result.file}`);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete('/sites/:name/backups', async (req, res, next) => {
+  try {
+    const result = await siteBackups.deleteBackup(req.params.name, String(req.query.file || ''));
+    store.addLog(req.user.username, 'nginx_site_backup_delete', `${req.params.name}:${result.file}`);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 停止站点：配置移出 Nginx 加载范围并重载，站点立即下线（配置文件保留，可随时重启）
+router.post('/sites/:name/stop', async (req, res, next) => {
+  try {
+    const result = await nginx.stopSite(req.params.name);
+    store.addLog(req.user.username, 'nginx_site_stop', result.file);
+    res.json({ success: true, output: result });
+  } catch (err) {
+    logger.error('Nginx stop site failed', { error: err.message });
+    next(err);
+  }
+});
+
+// 重启站点：已停止的恢复配置后重载；在线站点重载配置使其立即生效
+router.post('/sites/:name/restart', async (req, res, next) => {
+  try {
+    const result = await nginx.restartSite(req.params.name);
+    store.addLog(req.user.username, 'nginx_site_restart', result.file);
+    res.json({ success: true, output: result });
+  } catch (err) {
+    logger.error('Nginx restart site failed', { error: err.message });
     next(err);
   }
 });

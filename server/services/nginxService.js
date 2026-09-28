@@ -3,12 +3,27 @@ const fs = require('fs');
 const { run } = require('./commandRunner');
 const servicesConfig = require('../config/services').nginx;
 const mysqlService = require('./mysqlService');
+const store = require('../models/store');
 const phpService = require('./phpService');
 const sslService = require('./sslService');
 
 // 站点配置目录：RHEL 系（Alibaba Cloud Linux）通过 conf.d/*.conf 引入
 const SITE_DIR = path.join(servicesConfig.configDir, 'conf.d');
+// 已停止的站点配置存放目录：nginx.conf 的 include 只匹配 conf.d/*.conf 一层，
+// 子目录不会被加载，因此把配置移到此处即可让站点下线，同时保留文件便于随时重启
+const SITE_DISABLED_DIR = path.join(SITE_DIR, '.disabled');
 const SITE_NAME_RE = /^[A-Za-z0-9._-]+$/;
+
+// 站点独立日志目录：与 Fail2ban 站点保护使用的路径、格式完全一致
+// （fail2banService.siteLogLines），两处写入同一行内容，重复注入时互相幂等
+const NGINX_LOG_DIR = '/var/log/nginx';
+
+function siteLogLines(siteName) {
+  return [
+    `    access_log ${NGINX_LOG_DIR}/${siteName}.access.log main;`,
+    `    error_log ${NGINX_LOG_DIR}/${siteName}.error.log;`,
+  ];
+}
 
 // 伪静态预设：preset 为空时使用默认 try_files
 const REWRITE_PRESETS = {
@@ -78,7 +93,8 @@ async function testConfig() {
 
 // 解析 nginx -T 输出为站点列表：先按花括号配对切出 server 块并归属到文件，
 // 再把同一文件内 server_name 相同的块合并（Certbot 会追加一个 80 端口跳转块）
-function parseServerBlocks(stdout, siteDir) {
+// fpmByListen：fastcgi_pass 目标 → PHP 版本 的映射，用于在站点列表标注站点使用的 PHP 版本
+function parseServerBlocks(stdout, siteDir, fpmByListen = new Map()) {
   // nginx -T 会在每个配置文件内容前输出 "# configuration file <路径>:" 标记，
   // 据此把每个 server 块归属到具体配置文件，便于编辑与识别站点
   const marks = [];
@@ -123,13 +139,19 @@ function parseServerBlocks(stdout, siteDir) {
     if (!file.startsWith(siteDir)) continue;
     const serverName = block.text.match(/server_name\s+([^;]+);/)?.[1]?.trim() || '_';
     const listens = [...block.text.matchAll(/listen\s+([^;]+);/g)].map((m) => m[1].trim());
+    const proxyPass = block.text.match(/proxy_pass\s+([^;]+);/)?.[1]?.trim() || '';
+    const fpmListen = block.text.match(/fastcgi_pass\s+([^;]+);/)?.[1]?.trim() || '';
     const site = {
       name: path.basename(file, '.conf'),
       file,
       serverName,
       listen: listens.join(', '),
       root: block.text.match(/root\s+([^;]+);/)?.[1]?.trim() || '',
-      proxyPass: block.text.match(/proxy_pass\s+([^;]+);/)?.[1]?.trim() || '',
+      proxyPass,
+      fpmListen,
+      phpVersion: fpmByListen.get(fpmListen) || '',
+      // 站点类型：有 proxy_pass 为反代，有 fastcgi_pass 为 PHP，其余为静态
+      type: proxyPass ? 'proxy' : (fpmListen ? 'php' : 'html'),
       ssl: /ssl/.test(block.text),
     };
 
@@ -144,18 +166,84 @@ function parseServerBlocks(stdout, siteDir) {
     exist.listen = listenSet.join(', ');
     exist.root = exist.root || site.root;
     exist.proxyPass = exist.proxyPass || site.proxyPass;
+    exist.fpmListen = exist.fpmListen || site.fpmListen;
+    exist.phpVersion = exist.phpVersion || site.phpVersion;
+    // 跳转块（return 301）本身不含业务指令，类型取有内容的那一块
+    if (exist.type === 'html' && site.type !== 'html') exist.type = site.type;
     exist.ssl = exist.ssl || site.ssl;
   }
   return merged;
 }
 
-async function listSites() {
+// fastcgi_pass 目标 → PHP 版本 的映射：PHP 缺失或 pool 解析失败不影响站点列表本身
+async function buildFpmVersionMap() {
+  const fpmByListen = new Map();
   try {
-    const { stdout } = await run('nginx', ['-T']);
-    return parseServerBlocks(stdout, SITE_DIR);
+    for (const { version, listen } of await phpService.listFpmListens()) {
+      if (!fpmByListen.has(listen)) fpmByListen.set(listen, version);
+    }
+  } catch (err) {
+    // 忽略：站点列表仍正常返回，PHP 版本留空
+  }
+  return fpmByListen;
+}
+
+// 把单个配置文件文本解析成站点对象：用于未被 nginx 加载的（已停止）站点，
+// 无法从 nginx -T 输出识别，只能直接读文件，字段与 parseServerBlocks 保持一致
+function parseConfigText(text, file, fpmByListen = new Map()) {
+  const serverNames = [...text.matchAll(/server_name\s+([^;]+);/g)].map((m) => m[1].trim());
+  const listens = [...text.matchAll(/listen\s+([^;]+);/g)].map((m) => m[1].trim());
+  const roots = [...text.matchAll(/\broot\s+([^;]+);/g)].map((m) => m[1].trim());
+  const proxyPass = text.match(/proxy_pass\s+([^;]+);/)?.[1]?.trim() || '';
+  const fpmListen = text.match(/fastcgi_pass\s+([^;]+);/)?.[1]?.trim() || '';
+  return {
+    name: path.basename(file, '.conf'),
+    file,
+    serverName: [...new Set(serverNames)].join(' ') || '_',
+    listen: [...new Set(listens)].join(', '),
+    root: roots[0] || '',
+    proxyPass,
+    fpmListen,
+    phpVersion: fpmByListen.get(fpmListen) || '',
+    type: proxyPass ? 'proxy' : (fpmListen ? 'php' : 'html'),
+    ssl: /\bssl\b/.test(text),
+  };
+}
+
+// 列出已停止的站点：目录不存在（从未停过站点）时返回空列表
+async function listDisabledSites(fpmByListen = new Map()) {
+  let entries = [];
+  try {
+    entries = await fs.promises.readdir(SITE_DISABLED_DIR);
   } catch (err) {
     return [];
   }
+  const out = [];
+  for (const name of entries) {
+    if (!name.endsWith('.conf')) continue;
+    const file = path.join(SITE_DISABLED_DIR, name);
+    try {
+      const text = await fs.promises.readFile(file, 'utf8');
+      out.push({ ...parseConfigText(text, file, fpmByListen), enabled: false });
+    } catch (err) {
+      // 单个文件不可读不影响其它站点展示
+    }
+  }
+  return out;
+}
+
+// 站点列表 = nginx 当前加载的站点（enabled: true）+ 已停止站点（enabled: false）
+async function listSites() {
+  const fpmByListen = await buildFpmVersionMap();
+  let active = [];
+  try {
+    const { stdout } = await run('nginx', ['-T']);
+    active = parseServerBlocks(stdout, SITE_DIR, fpmByListen).map((site) => ({ ...site, enabled: true }));
+  } catch (err) {
+    // nginx 未运行或命令不可用时，仍返回已停止站点，避免它们在列表中消失
+    active = [];
+  }
+  return [...active, ...(await listDisabledSites(fpmByListen))];
 }
 
 // 监听端口集合：把 "80, 443 ssl" 这类 listen 串解析成数字端口
@@ -182,8 +270,10 @@ async function findDomainConflict(domain, selfName, ports) {
 }
 
 // siteBody：生成 server 块内部主体行（反代或静态/PHP 根目录），供 HTTP 与 HTTPS 两种 server 块共用
-function buildSiteBodyLines({ root, proxyPass, rewrite, type, fpmListen }) {
+function buildSiteBodyLines({ root, proxyPass, rewrite, type, fpmListen, logName }) {
   const lines = [];
+  // 独立访问日志：流量统计按站点维度读取该文件，避免混在全局日志里无法归属
+  if (logName) lines.push(...siteLogLines(logName), '');
   if (proxyPass) {
     lines.push('    location / {');
     lines.push(`        proxy_pass ${proxyPass};`);
@@ -219,9 +309,59 @@ function buildSiteBodyLines({ root, proxyPass, rewrite, type, fpmListen }) {
   return lines;
 }
 
+// 为存量站点补写独立访问日志（流量统计依赖该文件）：
+// 与新建站点写入的内容、位置完全一致，已存在的行不重复写入；写前备份，校验失败回滚
+async function enableSiteLog(siteName) {
+  const key = String(siteName || '').trim();
+  if (!SITE_NAME_RE.test(key)) throw new Error('非法站点名称');
+  const site = (await listSites()).find((item) => item.name === key);
+  if (!site || !site.file) throw new Error('站点不存在');
+  // 已停止的站点配置未被 nginx 加载，此时写入日志指令不会生效
+  if (site.enabled === false) throw new Error('站点已停止，请先重启站点再启用独立访问日志');
+
+  const original = await fs.promises.readFile(site.file, 'utf8');
+  const rows = original.split('\n').map((row) => row.trim());
+  const missing = siteLogLines(key).filter((line) => !rows.includes(line.trim()));
+  if (missing.length === 0) {
+    return { file: site.file, injected: false, reloaded: false };
+  }
+
+  // 插到首个 server_name 之后：与 Fail2ban 站点保护注入位置一致，
+  // 保证日志指令落在真正生效的 server 块内（Certbot 追加的跳转块不带业务指令）
+  const out = [];
+  let inserted = false;
+  for (const raw of original.split('\n')) {
+    out.push(raw);
+    if (!inserted && /^\s*server_name\s/.test(raw)) {
+      out.push(...missing);
+      inserted = true;
+    }
+  }
+  if (!inserted) throw new Error('未在站点配置中找到 server_name，无法写入日志指令');
+
+  const backupPath = `${site.file}.${Date.now()}.bak`;
+  await fs.promises.writeFile(backupPath, original, 'utf8');
+  await fs.promises.writeFile(site.file, out.join('\n'), 'utf8');
+
+  const test = await run('nginx', ['-t']);
+  if (test.exitCode !== 0) {
+    await fs.promises.writeFile(site.file, original, 'utf8');
+    await fs.promises.unlink(backupPath).catch(() => {});
+    throw new Error(`配置校验失败，已回滚：${(test.stderr || test.stdout || '').trim()}`);
+  }
+  const reload = await run('systemctl', ['reload', servicesConfig.service]);
+  return {
+    file: site.file,
+    injected: true,
+    injectedLines: missing.map((l) => l.trim()),
+    backup: backupPath,
+    reloaded: reload.exitCode === 0,
+  };
+}
+
 // 站点类型：静态 HTML 或 PHP（PHP 会额外生成 fastcgi 转发块）
 // 提供 certPath/keyPath 时生成 80 跳转 + 443 反代的完整 HTTPS 配置（直接复用面板已有证书）
-function buildSiteConfig({ serverName, listen, root, proxyPass, rewrite, type, fpmListen, certPath, keyPath }) {
+function buildSiteConfig({ serverName, listen, root, proxyPass, rewrite, type, fpmListen, certPath, keyPath, logName }) {
   if (certPath && keyPath) {
     const httpsLines = [
       'server {',
@@ -230,7 +370,7 @@ function buildSiteConfig({ serverName, listen, root, proxyPass, rewrite, type, f
       `    ssl_certificate ${certPath};`,
       `    ssl_certificate_key ${keyPath};`,
       '',
-      ...buildSiteBodyLines({ root, proxyPass, rewrite, type, fpmListen }),
+      ...buildSiteBodyLines({ root, proxyPass, rewrite, type, fpmListen, logName }),
       '}',
     ];
     const redirectLines = [
@@ -243,7 +383,7 @@ function buildSiteConfig({ serverName, listen, root, proxyPass, rewrite, type, f
     return `${httpsLines.join('\n')}\n\n${redirectLines.join('\n')}\n`;
   }
   const lines = ['server {', `    listen ${listen};`, `    server_name ${serverName};`, ''];
-  lines.push(...buildSiteBodyLines({ root, proxyPass, rewrite, type, fpmListen }));
+  lines.push(...buildSiteBodyLines({ root, proxyPass, rewrite, type, fpmListen, logName }));
   lines.push('}');
   return `${lines.join('\n')}\n`;
 }
@@ -449,6 +589,7 @@ async function createSiteInner({
     fpmListen,
     certPath: reuseCert ? String(certPath).trim() : '',
     keyPath: reuseCert ? String(keyPath).trim() : '',
+    logName: siteName,
   });
   await fs.promises.writeFile(filePath, content, 'utf8');
   reporter.note('directory', `配置文件已写入 ${filePath}`);
@@ -513,6 +654,8 @@ async function createSiteInner({
           user: mysqlService.normalizeName(primary),
           password: mysqlService.generatePassword(),
         });
+        // 密码只在开通流程展示一次，落库保存才能让 MySQL 列表里随时查看
+        store.saveDatabaseCredential(database.dbName, database.user, database.password);
         reporter.complete('database', `数据库 ${database.dbName} 创建成功`);
       } catch (err) {
         warnings.push(`数据库创建失败：${err.message}`);
@@ -538,10 +681,9 @@ async function createSiteInner({
 
 // 汇总站点关联资源（数据库、证书），供删除前的确认弹窗展示
 async function getSiteRelations(siteName) {
-  const key = String(siteName || '').trim();
-  if (!SITE_NAME_RE.test(key)) throw new Error('非法站点名称');
-
-  const filePath = path.join(SITE_DIR, `${key}.conf`);
+  const { name: key, active, disabled } = sitePaths(siteName);
+  // 已停止的站点配置在 .disabled 目录，删除同样需要能定位到
+  const filePath = fs.existsSync(active) ? active : disabled;
   if (!fs.existsSync(filePath)) throw new Error('站点配置文件不存在');
 
   const site = (await listSites()).find((item) => item.name === key);
@@ -582,6 +724,8 @@ async function deleteSite(siteName, { removeDb = true, removeSsl = true } = {}) 
   if (removeDb && relations.dbExists) {
     try {
       await mysqlService.dropDatabase({ dbName: relations.dbName, user: relations.dbName });
+      // 库已删除，凭据记录一并清理，避免列表里残留失效的密码
+      store.deleteManagedDatabase(relations.dbName);
       database = { dbName: relations.dbName, dropped: true };
     } catch (err) {
       warnings.push(`数据库删除失败：${err.message}`);
@@ -616,6 +760,75 @@ async function deleteSite(siteName, { removeDb = true, removeSsl = true } = {}) 
     certificate,
     warnings,
   };
+}
+
+// 站点配置文件的两个可能位置：在线（conf.d）与已停止（conf.d/.disabled）
+function sitePaths(siteName) {
+  const key = String(siteName || '').trim();
+  if (!SITE_NAME_RE.test(key)) throw new Error('非法站点名称');
+  return {
+    name: key,
+    active: path.join(SITE_DIR, `${key}.conf`),
+    disabled: path.join(SITE_DISABLED_DIR, `${key}.conf`),
+  };
+}
+
+// 停止站点：把配置移出 nginx 加载范围并重载，站点立即不再对外服务；
+// 校验或重载失败时把配置移回原位，保证不会把一个坏配置留在停用目录里
+async function stopSite(siteName) {
+  const { name, active, disabled } = sitePaths(siteName);
+  if (!fs.existsSync(active)) {
+    if (fs.existsSync(disabled)) {
+      return { name, file: disabled, enabled: false, changed: false, reloaded: false };
+    }
+    throw new Error('站点配置文件不存在');
+  }
+
+  await fs.promises.mkdir(SITE_DISABLED_DIR, { recursive: true });
+  await fs.promises.rename(active, disabled);
+
+  const test = await run('nginx', ['-t']);
+  if (test.exitCode !== 0) {
+    await fs.promises.rename(disabled, active).catch(() => {});
+    throw new Error(`配置校验失败，站点未停止：${(test.stderr || test.stdout || '').trim().slice(0, 300)}`);
+  }
+  const reload = await run('systemctl', ['reload', servicesConfig.service]);
+  if (reload.exitCode !== 0) {
+    // 重载失败时 nginx 仍按旧配置运行，把文件移回原位保持一致
+    await fs.promises.rename(disabled, active).catch(() => {});
+    await run('systemctl', ['reload', servicesConfig.service]);
+    throw new Error(`Nginx 重载失败，站点未停止：${(reload.stderr || reload.stdout || '').trim().slice(0, 300)}`);
+  }
+  return { name, file: disabled, enabled: false, changed: true, reloaded: true };
+}
+
+// 重启站点：已停止的站点恢复配置后重载；在线站点仅重载配置使其立即生效
+async function restartSite(siteName) {
+  const { name, active, disabled } = sitePaths(siteName);
+  const wasDisabled = fs.existsSync(disabled);
+  if (wasDisabled && fs.existsSync(active)) {
+    throw new Error('同名站点配置已在线，请先处理配置冲突');
+  }
+  if (!wasDisabled && !fs.existsSync(active)) {
+    throw new Error('站点配置文件不存在');
+  }
+
+  if (wasDisabled) {
+    await fs.promises.mkdir(SITE_DIR, { recursive: true });
+    await fs.promises.rename(disabled, active);
+  }
+
+  const test = await run('nginx', ['-t']);
+  if (test.exitCode !== 0) {
+    if (wasDisabled) await fs.promises.rename(active, disabled).catch(() => {});
+    throw new Error(`配置校验失败，站点未重启：${(test.stderr || test.stdout || '').trim().slice(0, 300)}`);
+  }
+  const reload = await run('systemctl', ['reload', servicesConfig.service]);
+  if (reload.exitCode !== 0) {
+    if (wasDisabled) await fs.promises.rename(active, disabled).catch(() => {});
+    throw new Error(`Nginx 重载失败：${(reload.stderr || reload.stdout || '').trim().slice(0, 300)}`);
+  }
+  return { name, file: active, enabled: true, changed: wasDisabled, reloaded: true };
 }
 
 async function readConfig(filePath) {
@@ -680,8 +893,12 @@ module.exports = {
   PROVISION_STEPS,
   getSiteRelations,
   deleteSite,
+  stopSite,
+  restartSite,
   readConfig,
   writeConfig,
+  enableSiteLog,
   buildSiteConfig,
   buildDefaultPage,
+  NGINX_LOG_DIR,
 };

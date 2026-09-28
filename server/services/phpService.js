@@ -604,11 +604,22 @@ async function getFpmListen(version = '') {
   return m[1].startsWith('/') ? `unix:${m[1]}` : m[1];
 }
 
+// 各已安装版本对应的 fastcgi_pass 目标：供 Nginx 站点列表反查站点实际使用的 PHP 版本
+async function listFpmListens() {
+  const out = [];
+  for (const item of listInstalled()) {
+    const listen = await getFpmListen(item.version);
+    if (listen) out.push({ version: item.version, listen });
+  }
+  return out;
+}
+
 module.exports = {
   getStatus,
   control,
   listVersions,
   getFpmListen,
+  listFpmListens,
   getDefaultVersion,
   getSettings,
   updateSettings,

@@ -1812,4 +1812,5 @@ module.exports = {
   fetch3xuiLatest,
   getCached3xuiVersions,
   is3xuiCached,
+  INSTALL_MARKERS,
 };

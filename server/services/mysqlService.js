@@ -101,6 +101,33 @@ async function createDatabase({ dbName, user, password } = {}) {
   return { dbName: db, user: account, password: pwd, host: 'localhost' };
 }
 
+// 重置数据库用户密码：存量库的密码只在建站/建库时展示过一次，MySQL 内仅有哈希，只能重置后重新记录
+async function resetDatabasePassword({ dbName, user, password } = {}) {
+  const db = String(dbName || '').trim();
+  const account = String(user || '').trim();
+  const pwd = String(password || '').trim();
+
+  if (!IDENT_RE.test(db)) throw new Error('数据库名称只能包含字母、数字和下划线');
+  if (!IDENT_RE.test(account)) throw new Error('数据库用户名只能包含字母、数字和下划线');
+  if (!pwd || !PASSWORD_RE.test(pwd)) throw new Error('数据库密码只能是字母或数字');
+
+  const status = await getStatus();
+  if (status !== 'active') throw new Error('MySQL 未运行，无法重置数据库密码');
+
+  const sql = [
+    `CREATE USER IF NOT EXISTS '${account}'@'localhost' IDENTIFIED BY '${pwd}';`,
+    `ALTER USER '${account}'@'localhost' IDENTIFIED BY '${pwd}';`,
+    `GRANT ALL PRIVILEGES ON \`${db}\`.* TO '${account}'@'localhost';`,
+    'FLUSH PRIVILEGES;',
+  ].join(' ');
+
+  const result = await run('mysql', ['-e', sql], { timeout: 30000 });
+  if (result.exitCode !== 0) {
+    throw new Error(`密码重置失败：${(result.stderr || result.stdout || '').trim()}`);
+  }
+  return { dbName: db, user: account, password: pwd };
+}
+
 // 判断数据库是否存在：删除站点前用于确认关联资源
 async function databaseExists(dbName) {
   const db = String(dbName || '').trim();
@@ -142,6 +169,7 @@ module.exports = {
   getInfo,
   listDatabases,
   createDatabase,
+  resetDatabasePassword,
   databaseExists,
   dropDatabase,
   normalizeName,

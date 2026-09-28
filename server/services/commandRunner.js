@@ -14,6 +14,7 @@ const ALLOWED_COMMANDS = {
   phpFpm: '/usr/sbin/php-fpm',
   mysql: '/usr/bin/mysql',
   mysqladmin: '/usr/bin/mysqladmin',
+  mysqldump: '/usr/bin/mysqldump',
   redisCli: '/usr/bin/redis-cli',
   redisServer: '/usr/bin/redis-server',
   supervisorctl: '/usr/bin/supervisorctl',
@@ -46,6 +47,7 @@ const ALLOWED_COMMANDS = {
   ffmpeg: '/usr/local/bin/ffmpeg',
   ffprobe: '/usr/local/bin/ffprobe',
   pip3: '/usr/bin/pip3',
+  journalctl: '/usr/bin/journalctl',
 };
 
 /**

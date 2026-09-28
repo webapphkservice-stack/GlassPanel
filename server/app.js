@@ -18,6 +18,7 @@ const firewallRouter = require('./routes/firewall');
 const sslRouter = require('./routes/ssl');
 const appsRouter = require('./routes/apps');
 const fail2banRouter = require('./routes/fail2ban');
+const cleanupRouter = require('./routes/cleanup');
 
 const app = express();
 
@@ -118,6 +119,7 @@ app.use('/api/firewall', authMiddleware, firewallRouter);
 app.use('/api/ssl', authMiddleware, sslRouter);
 app.use('/api/apps', authMiddleware, appsRouter);
 app.use('/api/fail2ban', authMiddleware, fail2banRouter);
+app.use('/api/cleanup', authMiddleware, cleanupRouter);
 
 // 前端路由兜底
 app.get('*', (req, res) => {

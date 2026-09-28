@@ -51,6 +51,14 @@ function initTables() {
       expiresAt INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_token_blocklist_expires ON token_blocklist(expiresAt);
+
+    CREATE TABLE IF NOT EXISTS mysql_databases (
+      name TEXT PRIMARY KEY,
+      username TEXT,
+      password TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 }
 initTables();
@@ -77,6 +85,14 @@ function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_token_blocklist_expires ON token_blocklist(expiresAt);
   `);
+
+  // 补齐 mysql_databases 的凭据字段（早期版本只登记库名）
+  const dbColumns = db.prepare('PRAGMA table_info(mysql_databases)').all().map((c) => c.name);
+  ['username', 'password', 'updatedAt'].forEach((name) => {
+    if (!dbColumns.includes(name)) {
+      db.prepare(`ALTER TABLE mysql_databases ADD COLUMN ${name} TEXT`).run();
+    }
+  });
 
   // 清理过期 blocklist
   cleanupExpiredBlocklist();
@@ -173,5 +189,26 @@ module.exports = {
   },
   deleteCertificate(domain) {
     return db.prepare('DELETE FROM certificates WHERE domain = ?').run(domain);
+  },
+
+  // 面板创建/重置过密码的 MySQL 数据库凭据：列表默认只展示站点对应的库，
+  // 手动新增的库无对应站点，登记后才能出现在列表中；密码只在此保存，MySQL 内仅有哈希
+  saveDatabaseCredential(name, username, password) {
+    return db.prepare(`
+      INSERT INTO mysql_databases (name, username, password, updatedAt) VALUES (?, ?, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET
+        username = excluded.username,
+        password = excluded.password,
+        updatedAt = excluded.updatedAt
+    `).run(name, username, password, new Date().toISOString());
+  },
+  getManagedDatabases() {
+    return db.prepare('SELECT name FROM mysql_databases').all().map((row) => row.name);
+  },
+  listDatabaseCredentials() {
+    return db.prepare('SELECT name, username, password, updatedAt FROM mysql_databases').all();
+  },
+  deleteManagedDatabase(name) {
+    return db.prepare('DELETE FROM mysql_databases WHERE name = ?').run(name);
   },
 };

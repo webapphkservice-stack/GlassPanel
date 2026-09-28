@@ -11,6 +11,9 @@ export const saveNginxConfig = (path, content, reload = false) => request.post('
 // 删除站点会同时清理关联数据库与证书，耗时较长，单独放宽超时
 export const getSiteRelations = (name) => request.get(`/nginx/sites/${encodeURIComponent(name)}/relations`);
 export const deleteNginxSite = (name) => request.delete(`/nginx/sites/${encodeURIComponent(name)}`, { timeout: 240000 });
+// 站点下线 / 重启：都会校验配置并重载 Nginx，耗时略长
+export const stopNginxSite = (name) => request.post(`/nginx/sites/${encodeURIComponent(name)}/stop`, {}, { timeout: 60000 });
+export const restartNginxSite = (name) => request.post(`/nginx/sites/${encodeURIComponent(name)}/restart`, {}, { timeout: 60000 });
 
 // 开通进度查询：失败时拦截器只会抛出字符串（且不含状态码），这里归一化成结果对象，
 // 便于轮询逻辑区分「进度已过期」与「网络/服务异常」
@@ -54,3 +57,21 @@ export const extractSiteFile = (name, path, dest = '') =>
     { path, dest },
     { timeout: 600000 }
   );
+
+// —— 站点流量 & 备份 ——
+export const getSiteTraffic = (name, hours = 24) =>
+  request.get(`/nginx/sites/${encodeURIComponent(name)}/traffic`, { params: { hours } });
+export const getSiteBackups = (name) =>
+  request.get(`/nginx/sites/${encodeURIComponent(name)}/backups`);
+export const createSiteBackup = (name) =>
+  request.post(`/nginx/sites/${encodeURIComponent(name)}/backups`, {}, { timeout: 600000 });
+export const downloadSiteBackup = (name, file) =>
+  request.get(`/nginx/sites/${encodeURIComponent(name)}/backups/download`, {
+    params: { file }, responseType: 'blob', timeout: 600000,
+  });
+export const restoreSiteBackup = (name, file) =>
+  request.post(`/nginx/sites/${encodeURIComponent(name)}/backups/restore`, { file }, { timeout: 600000 });
+export const deleteSiteBackup = (name, file) =>
+  request.delete(`/nginx/sites/${encodeURIComponent(name)}/backups`, { params: { file } });
+export const enableSiteLog = (name) =>
+  request.post(`/nginx/sites/${encodeURIComponent(name)}/traffic/log`, {}, { timeout: 30000 });

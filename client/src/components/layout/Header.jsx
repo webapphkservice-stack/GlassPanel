@@ -3,8 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore, useUIStore as useSidebarUI, THEMES, useThemeStore } from '@/store';
 import { useUIStore } from '@/components/common/uiStore';
-import { Bell, Menu, RefreshCw, Palette, Check, Shield, Globe } from '@/components/common/Icons';
+import { Bell, Menu, RefreshCw, Palette, Check, Shield, Globe, Trash2 } from '@/components/common/Icons';
 import GlassModal from '@/components/common/GlassModal';
+import CleanupModal from '@/components/common/CleanupModal';
 import { restartPanel } from '@/api/system';
 import i18n from '@/i18n';
 
@@ -24,6 +25,7 @@ export default function Header({ title }) {
   const navigate = useNavigate();
   const [restarting, setRestarting] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef(null);
 
@@ -76,6 +78,13 @@ export default function Header({ title }) {
         <h1 className="text-xl font-semibold">{title}</h1>
       </div>
       <div className="flex items-center gap-4">
+        <button
+          onClick={() => setCleanupOpen(true)}
+          className="rounded-full p-2 hover:bg-white/10 transition-colors"
+          title={t('header.cleanup')}
+        >
+          <Trash2 className="w-5 h-5" />
+        </button>
         <button
           onClick={() => setThemeOpen(true)}
           className="rounded-full p-2 hover:bg-white/10 transition-colors"
@@ -176,6 +185,8 @@ export default function Header({ title }) {
           })}
         </div>
       </GlassModal>
+
+      <CleanupModal open={cleanupOpen} onClose={() => setCleanupOpen(false)} />
     </header>
   );
 }

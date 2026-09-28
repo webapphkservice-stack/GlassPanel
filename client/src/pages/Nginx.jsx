@@ -11,6 +11,8 @@ import {
   saveNginxConfig,
   getSiteRelations,
   deleteNginxSite,
+  stopNginxSite,
+  restartNginxSite,
   getProvisionStatus,
 } from '@/api/nginx';
 import GlassCard from '@/components/common/GlassCard';
@@ -21,6 +23,8 @@ import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
 import { getMysqlStatus } from '@/api/mysql';
 import SiteFileBrowser from '@/components/site/SiteFileBrowser';
+import SiteTrafficModal from '@/components/site/SiteTrafficModal';
+import SiteBackupModal from '@/components/site/SiteBackupModal';
 import ProvisionFlowModal from '@/components/site/ProvisionFlowModal';
 import { Play, Square, RefreshCw, FileText, Globe, Check, Plus } from '@/components/common/Icons';
 import { useUIStore } from '@/components/common/uiStore';
@@ -82,8 +86,12 @@ export default function Nginx() {
   const [rootTouched, setRootTouched] = useState(false);
   const [mysqlStatus, setMysqlStatus] = useState('unknown');
   const [deletingSite, setDeletingSite] = useState('');
+  // 正在停止/重启的站点名，用于禁用按钮并显示进行中文案
+  const [actingSite, setActingSite] = useState('');
   const [sitesRefreshing, setSitesRefreshing] = useState(false);
   const [filesSite, setFilesSite] = useState(null);
+  const [trafficSite, setTrafficSite] = useState(null);
+  const [backupSite, setBackupSite] = useState(null);
   const [provisionOpen, setProvisionOpen] = useState(false);
   const [provision, setProvision] = useState(null);
   const [provisionForm, setProvisionForm] = useState(EMPTY_FORM);
@@ -251,6 +259,43 @@ export default function Nginx() {
     }
   }
 
+  // 停止站点：配置移出 Nginx 加载范围并重载，站点立即下线（配置文件保留，可随时重启）
+  async function handleStopSite(site) {
+    const label = site.serverName || site.name;
+    const ok = await uiConfirm({
+      title: t('nginx.stopSite'),
+      message: t('nginx.stopConfirm', { name: label }),
+      confirmText: t('nginx.stopSite'),
+    });
+    if (!ok) return;
+    setActingSite(site.name);
+    try {
+      const data = await stopNginxSite(site.name);
+      toast(data?.output?.changed === false ? t('nginx.alreadyStopped') : t('nginx.stopDone', { name: label }), 'success');
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    } finally {
+      // 停止过程包含配置校验与重载，请求中断也要拉一次最新列表
+      await fetchSites();
+      setActingSite('');
+    }
+  }
+
+  // 重启站点：已停止的恢复配置后重载上线；在线站点重载配置使其立即生效
+  async function handleRestartSite(site) {
+    const label = site.serverName || site.name;
+    setActingSite(site.name);
+    try {
+      await restartNginxSite(site.name);
+      toast(t('nginx.restartDone', { name: label }), 'success');
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    } finally {
+      await fetchSites();
+      setActingSite('');
+    }
+  }
+
   async function handleTest() {
     try {
       const data = await testNginxConfig();
@@ -407,6 +452,7 @@ export default function Nginx() {
                   <th className="pb-3 font-medium">{t('nginx.serverName')}</th>
                   <th className="pb-3 font-medium">{t('nginx.listen')}</th>
                   <th className="pb-3 font-medium">{t('nginx.rootProxy')}</th>
+                  <th className="pb-3 font-medium">{t('nginx.phpVersion')}</th>
                   <th className="pb-3 font-medium">{t('nginx.ssl')}</th>
                   <th className="pb-3 font-medium">{t('nginx.configFile')}</th>
                   <th className="pb-3 font-medium">{t('nginx.actions')}</th>
@@ -414,10 +460,29 @@ export default function Nginx() {
               </thead>
               <tbody>
                 {sites.map((site, idx) => (
-                  <tr key={idx} className="border-b border-white/5 last:border-0">
-                    <td className="py-3 font-medium">{site.serverName}</td>
+                  <tr
+                    key={idx}
+                    className={`border-b border-white/5 last:border-0 ${site.enabled === false ? 'opacity-60' : ''}`}
+                  >
+                    <td className="py-3 font-medium">
+                      <span className="flex flex-wrap items-center gap-2">
+                        {site.serverName}
+                        {site.enabled === false && (
+                          <span className="rounded-full bg-orange-500/15 px-2 py-0.5 text-xs text-orange-300">
+                            {t('nginx.stopped')}
+                          </span>
+                        )}
+                      </span>
+                    </td>
                     <td className="py-3 text-white/70">{site.listen}</td>
                     <td className="py-3 text-white/70">{site.root || site.proxyPass || '-'}</td>
+                    <td className="py-3">
+                      {site.phpVersion ? (
+                        <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-xs text-indigo-300">PHP {site.phpVersion}</span>
+                      ) : (
+                        <span className="text-white/40">-</span>
+                      )}
+                    </td>
                     <td className="py-3">
                       {site.ssl ? (
                         <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-300">Yes</span>
@@ -439,7 +504,21 @@ export default function Nginx() {
                       )}
                     </td>
                     <td className="py-3">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setTrafficSite(site)}
+                          className="rounded-full border border-indigo-500/30 bg-indigo-500/10 px-3 py-1 text-xs text-indigo-300 transition-colors hover:bg-indigo-500/20"
+                        >
+                          {t('nginx.traffic')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setBackupSite(site)}
+                          className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs text-amber-300 transition-colors hover:bg-amber-500/20"
+                        >
+                          {t('nginx.backup')}
+                        </button>
                         <button
                           type="button"
                           onClick={() => setFilesSite(site)}
@@ -448,6 +527,26 @@ export default function Nginx() {
                           className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           {t('nginx.openFiles')}
+                        </button>
+                        {site.enabled !== false && (
+                          <button
+                            type="button"
+                            onClick={() => handleStopSite(site)}
+                            disabled={actingSite === site.name || deletingSite === site.name}
+                            title={t('nginx.stopSiteHint')}
+                            className="rounded-full border border-orange-500/30 bg-orange-500/10 px-3 py-1 text-xs text-orange-300 transition-colors hover:bg-orange-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {actingSite === site.name ? t('nginx.acting') : t('nginx.stopSite')}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleRestartSite(site)}
+                          disabled={actingSite === site.name || deletingSite === site.name}
+                          title={t('nginx.restartSiteHint')}
+                          className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {actingSite === site.name ? t('nginx.acting') : t('nginx.restartSite')}
                         </button>
                         <button
                           type="button"
@@ -464,7 +563,7 @@ export default function Nginx() {
                 ))}
                 {sites.length === 0 && (
                   <tr>
-                    <td colSpan={6}><EmptyState message={t('common.noSites')} /></td>
+                    <td colSpan={7}><EmptyState message={t('common.noSites')} /></td>
                   </tr>
                 )}
               </tbody>
@@ -689,6 +788,8 @@ export default function Nginx() {
       </GlassModal>
 
       <SiteFileBrowser site={filesSite} onClose={() => setFilesSite(null)} />
+      <SiteTrafficModal site={trafficSite} onClose={() => setTrafficSite(null)} />
+      <SiteBackupModal site={backupSite} onClose={() => setBackupSite(null)} />
 
       <ProvisionFlowModal
         open={provisionOpen}
