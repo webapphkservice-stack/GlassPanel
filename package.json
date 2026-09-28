@@ -1,0 +1,20 @@
+{
+  "name": "glass-panel",
+  "version": "1.0.0",
+  "description": "玻璃液态风格轻量级服务器管理面板",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "install:all": "npm install && cd server && npm install && cd ../client && npm install",
+    "build": "cd client && npm run build",
+    "start": "cd server && npm start"
+  },
+  "keywords": ["panel", "server", "nginx", "php", "mysql", "redis", "ssl"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

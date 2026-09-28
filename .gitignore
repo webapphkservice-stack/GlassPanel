@@ -1,0 +1,27 @@
+# 依赖
+node_modules/
+
+# 构建产物
+client/dist/
+dist/
+build/
+
+# 环境变量（仅保留模板 .env.example）
+.env
+.env.*
+!.env.example
+
+# 密钥与证书（服务器 SSH 私钥等）
+*.pem
+*.key
+*.p12
+
+# 运行时数据与日志（SQLite 库内含用户、密码哈希与 TOTP 密钥）
+data/
+logs/
+*.log
+
+# 编辑器与系统文件
+.DS_Store
+.trae/
+*.swp
