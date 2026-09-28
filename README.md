@@ -79,7 +79,7 @@ chmod +x scripts/*.sh
 安装脚本会依次完成：
 
 1. 通过包管理器安装基础依赖（curl、wget、git、sqlite3、nginx）
-2. 安装 Node.js 20 LTS（检测到非 20 版本时会安装）
+2. 安装 Node.js 24 LTS（取自 nodejs.org 官方二进制并校验 sha256，安装到 `/usr/local`；已检测到 ≥ 24 时跳过，不会降级更高版本）
 3. 安装前后端依赖（`npm run install:all`）
 4. 由 `.env.example` 生成 `.env`，自动写入随机 `JWT_SECRET` 并切换为生产配置（已存在 `.env` 时不会覆盖）
 5. 初始化管理员账号，**随机生成强密码并回显在终端**（可用 `ADMIN_USER` / `ADMIN_PASS` 环境变量指定）
@@ -174,7 +174,7 @@ www-data ALL=(ALL) NOPASSWD: GLASS_PANEL
 ## 技术栈
 
 - 前端：React 18、React Router 6、Zustand、Tailwind CSS 3、Vite 5、Monaco Editor、i18next、axios
-- 后端：Node.js 20、Express 4、better-sqlite3、jsonwebtoken、bcryptjs、speakeasy（TOTP）、helmet、express-rate-limit
+- 后端：Node.js 24、Express 4、better-sqlite3、jsonwebtoken、bcryptjs、speakeasy（TOTP）、helmet、express-rate-limit
 - 部署：systemd、Nginx（可选反向代理）
 
 ## 安全说明

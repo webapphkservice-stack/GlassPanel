@@ -12,6 +12,20 @@ case "${1:-}" in
       echo "请使用 root 权限运行" >&2
       exit 1
     fi
+    # 探测 node 绝对路径写入服务单元：写死路径会与实际安装位置不一致，
+    # 导致「终端 node -v」与服务实际运行的版本不同
+    NODE_BIN=""
+    for cand in /usr/local/bin/node /usr/bin/node "$(command -v node 2>/dev/null)"; do
+      if [ -n "$cand" ] && [ -x "$cand" ]; then
+        NODE_BIN="$cand"
+        break
+      fi
+    done
+    if [ -z "$NODE_BIN" ]; then
+      echo "未找到 node 可执行文件，请先安装 Node.js 24（scripts/install.sh）" >&2
+      exit 1
+    fi
+    echo "使用 Node：$NODE_BIN ($("$NODE_BIN" -v))"
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Glass Panel Server
@@ -21,7 +35,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=$REPO_DIR/server
-ExecStart=/usr/bin/node $REPO_DIR/server/bin/www.js
+ExecStart=$NODE_BIN $REPO_DIR/server/bin/www.js
 Restart=on-failure
 # 只杀主进程：面板重启时不连带杀掉后台任务（源码编译、系统更新等）
 KillMode=process
