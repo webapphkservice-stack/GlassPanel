@@ -314,7 +314,34 @@ ${DEFAULT_PAGE_STYLE}
 `;
 }
 
-async function createSite({
+// 开通流程的步骤定义（建站领域唯一真源，路由层据此初始化进度）
+const PROVISION_STEPS = [
+  { key: 'directory' },
+  { key: 'ssl' },
+  { key: 'database' },
+];
+
+// 默认空上报器：旧调用方（appService 安装 3x-ui 时自动建反代站点）无需感知进度
+const NOOP_REPORTER = {
+  begin() {},
+  note() {},
+  complete() {},
+  fail() {},
+  skip() {},
+  failOpen() {},
+};
+
+async function createSite(input, { reporter = NOOP_REPORTER } = {}) {
+  try {
+    return await createSiteInner(input || {}, reporter);
+  } catch (err) {
+    // 标记是哪一步失败后原样抛出，保持既有错误契约不变
+    reporter.failOpen(err.message);
+    throw err;
+  }
+}
+
+async function createSiteInner({
   name,
   serverName,
   listen,
@@ -328,7 +355,7 @@ async function createSite({
   createDb,
   certPath,
   keyPath,
-}) {
+}, reporter) {
   const siteName = String(name || '').trim().replace(/\.conf$/, '');
   const domain = String(serverName || '').trim();
   const port = String(listen || '80').trim();
@@ -340,6 +367,10 @@ async function createSite({
   const wantSsl = ssl === true || ssl === 'true';
   const wantDb = createDb === true || createDb === 'true';
   const mail = String(email || '').trim();
+
+  // 未勾选的步骤提前标记为「已跳过」，进度弹窗打开即可看到
+  if (!wantSsl) reporter.skip('ssl', 'disabled');
+  if (!wantDb) reporter.skip('database', 'disabled');
 
   if (!SITE_NAME_RE.test(siteName)) {
     throw new Error('站点名称只能包含字母、数字、点、下划线和短横线');
@@ -375,6 +406,10 @@ async function createSite({
     );
   }
 
+  // 校验全部通过，进入步骤 1「创建目录」（涵盖建目录、默认首页、写配置、校验、重载）
+  reporter.begin('directory');
+  reporter.note('directory', '正在创建网站目录与 nginx 配置');
+
   // 运行目录拼接在网站根目录之后，作为 nginx 实际 root
   const siteRoot = runDirClean ? path.join(docRoot, runDirClean) : docRoot;
 
@@ -387,6 +422,7 @@ async function createSite({
     if (!fs.existsSync(defaultPage)) {
       await fs.promises.writeFile(defaultPage, buildDefaultPage(domain, typeKey), 'utf8');
     }
+    reporter.note('directory', `已创建网站目录与默认首页：${defaultPage}`);
   }
 
   // 校验传入证书路径必须位于 Let's Encrypt live 目录内，防止任意路径写入配置
@@ -415,6 +451,7 @@ async function createSite({
     keyPath: reuseCert ? String(keyPath).trim() : '',
   });
   await fs.promises.writeFile(filePath, content, 'utf8');
+  reporter.note('directory', `配置文件已写入 ${filePath}`);
 
   // 先校验再重载，校验失败时回滚新配置，避免影响在运行的站点
   const test = await run('nginx', ['-t']);
@@ -422,8 +459,15 @@ async function createSite({
     await fs.promises.unlink(filePath).catch(() => {});
     throw new Error(`配置校验失败，已回滚：${(test.stderr || test.stdout || '').trim()}`);
   }
+  reporter.note('directory', 'nginx -t 配置校验通过');
 
   const reload = await run('systemctl', ['reload', servicesConfig.service]);
+  // 重载失败不抛错也不计入 warnings（保持既有语义），仅在进度里提示站点尚未生效
+  if (reload.exitCode === 0) {
+    reporter.complete('directory', 'Nginx 已重载，站点已生效');
+  } else {
+    reporter.complete('directory', `Nginx 重载未成功（退出码 ${reload.exitCode}），站点尚未生效`);
+  }
 
   // 站点已生效，后续 SSL 与数据库失败只记录告警，不影响站点本身
   const warnings = [];
@@ -433,18 +477,26 @@ async function createSite({
   if (wantSsl) {
     if (!primary) {
       warnings.push('未找到可用于签发证书的域名');
+      reporter.fail('ssl', '未找到可用于签发证书的域名');
     } else if (reuseCert) {
       // 配置中已引用面板已有证书，无需重新签发
       sslResult = { domain: primary, success: true, reused: true };
+      reporter.complete('ssl', '已复用面板已有证书');
     } else {
       // 站点已占用 80 端口，必须使用 nginx 插件签发而非 standalone
+      reporter.begin('ssl');
+      reporter.note('ssl', `正在为 ${primary} 签发证书`);
       const args = ['--nginx', '-d', primary, '--agree-tos', '-n', '--redirect'];
       if (mail) args.push('-m', mail);
       else args.push('--register-unsafely-without-email');
       const result = await run('certbot', args, { timeout: 180000 });
       sslResult = { domain: primary, success: result.exitCode === 0 };
       if (result.exitCode !== 0) {
-        warnings.push(`SSL 证书签发失败：${(result.stderr || result.stdout || '').trim().slice(0, 300)}`);
+        const detail = (result.stderr || result.stdout || '').trim().slice(0, 300);
+        warnings.push(`SSL 证书签发失败：${detail}`);
+        reporter.fail('ssl', `证书签发失败：${detail}`);
+      } else {
+        reporter.complete('ssl', '证书签发成功');
       }
     }
   }
@@ -452,15 +504,19 @@ async function createSite({
   if (wantDb) {
     if (!primary) {
       warnings.push('未找到可用于生成数据库名的域名');
+      reporter.fail('database', '未找到可用于生成数据库名的域名');
     } else {
+      reporter.begin('database');
       try {
         database = await mysqlService.createDatabase({
           dbName: mysqlService.normalizeName(primary),
           user: mysqlService.normalizeName(primary),
           password: mysqlService.generatePassword(),
         });
+        reporter.complete('database', `数据库 ${database.dbName} 创建成功`);
       } catch (err) {
         warnings.push(`数据库创建失败：${err.message}`);
+        reporter.fail('database', `数据库创建失败：${err.message}`);
       }
     }
   }
@@ -621,6 +677,7 @@ module.exports = {
   listSites,
   parseServerBlocks,
   createSite,
+  PROVISION_STEPS,
   getSiteRelations,
   deleteSite,
   readConfig,

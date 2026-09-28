@@ -1,11 +1,15 @@
 const express = require('express');
 const nginx = require('../services/nginxService');
 const siteFiles = require('../services/siteFileService');
+const provision = require('../services/provisionTracker');
 const fail2ban = require('../services/fail2banService');
 const store = require('../models/store');
 const logger = require('../utils/logger');
 
 const router = express.Router();
+
+// 开通进度标识：由前端生成并随创建请求带上来，需满足足够长度避免被猜测
+const OP_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
 router.get('/status', async (req, res, next) => {
   try {
@@ -47,12 +51,40 @@ router.get('/sites', async (req, res, next) => {
 });
 
 router.post('/sites', async (req, res, next) => {
+  const { opId, ...payload } = req.body || {};
+  // 带合法 opId 时启用开通进度跟踪，前端可轮询对应只读接口实时展示步骤
+  const track = typeof opId === 'string' && OP_ID_RE.test(opId);
+  let started = false;
   try {
-    const result = await nginx.createSite(req.body || {});
+    const options = {};
+    if (track) {
+      options.reporter = provision.begin(opId, {
+        steps: nginx.PROVISION_STEPS,
+        user: req.user?.username,
+        name: payload.name,
+        domain: payload.serverName,
+      });
+      started = true;
+    }
+    const result = await nginx.createSite(payload, options);
+    if (started) provision.finish(opId, result, result.warnings);
     store.addLog(req.user.username, 'nginx_site_create', result.file);
     res.json({ success: true, output: result });
   } catch (err) {
+    // createSite 内部已上报失败；这里只作兜底，避免进度停留在「进行中」
+    if (started) provision.fail(opId, err.message);
     logger.error('Nginx create site failed', { error: err.message });
+    next(err);
+  }
+});
+
+// 开通进度查询：创建期间前端每秒轮询，只读且仅能读取自己发起的流程
+router.get('/sites/provision/:opId', (req, res, next) => {
+  try {
+    const snapshot = provision.get(req.params.opId, req.user?.username);
+    if (!snapshot) return res.status(404).json({ error: '开通进度不存在或已过期' });
+    res.json({ provision: snapshot });
+  } catch (err) {
     next(err);
   }
 });

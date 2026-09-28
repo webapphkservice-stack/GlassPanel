@@ -12,6 +12,18 @@ export const saveNginxConfig = (path, content, reload = false) => request.post('
 export const getSiteRelations = (name) => request.get(`/nginx/sites/${encodeURIComponent(name)}/relations`);
 export const deleteNginxSite = (name) => request.delete(`/nginx/sites/${encodeURIComponent(name)}`, { timeout: 240000 });
 
+// 开通进度查询：失败时拦截器只会抛出字符串（且不含状态码），这里归一化成结果对象，
+// 便于轮询逻辑区分「进度已过期」与「网络/服务异常」
+export async function getProvisionStatus(opId) {
+  try {
+    const data = await request.get(`/nginx/sites/provision/${encodeURIComponent(opId)}`, { timeout: 10000 });
+    return { ok: true, provision: data?.provision || null };
+  } catch (message) {
+    const text = String(message);
+    return { ok: false, expired: text.includes('不存在或已过期'), message: text };
+  }
+}
+
 // —— 站点文件管理（限定在该站点 root 内） ——
 export const getSiteFiles = (name, dir = '') =>
   request.get(`/nginx/sites/${encodeURIComponent(name)}/files`, { params: { dir } });

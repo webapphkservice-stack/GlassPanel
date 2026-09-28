@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import Editor from '@monaco-editor/react';
 import {
@@ -11,6 +11,7 @@ import {
   saveNginxConfig,
   getSiteRelations,
   deleteNginxSite,
+  getProvisionStatus,
 } from '@/api/nginx';
 import GlassCard from '@/components/common/GlassCard';
 import LiquidButton from '@/components/common/LiquidButton';
@@ -20,6 +21,7 @@ import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
 import { getMysqlStatus } from '@/api/mysql';
 import SiteFileBrowser from '@/components/site/SiteFileBrowser';
+import ProvisionFlowModal from '@/components/site/ProvisionFlowModal';
 import { Play, Square, RefreshCw, FileText, Globe, Check, Plus } from '@/components/common/Icons';
 import { useUIStore } from '@/components/common/uiStore';
 
@@ -54,6 +56,12 @@ const TYPE_OPTIONS = [
   { value: 'php', labelKey: 'nginx.php', hintKey: 'nginx.phpHint' },
 ];
 
+// 开通进度标识：与后端 OP_ID_RE 保持一致（8-64 位字母数字与 _ -）
+function genOpId() {
+  const raw = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return raw.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+}
+
 export default function Nginx() {
   const { t } = useTranslation();
   const toast = useUIStore((s) => s.toast);
@@ -76,6 +84,14 @@ export default function Nginx() {
   const [deletingSite, setDeletingSite] = useState('');
   const [sitesRefreshing, setSitesRefreshing] = useState(false);
   const [filesSite, setFilesSite] = useState(null);
+  const [provisionOpen, setProvisionOpen] = useState(false);
+  const [provision, setProvision] = useState(null);
+  const [provisionForm, setProvisionForm] = useState(EMPTY_FORM);
+  const [provisionError, setProvisionError] = useState('');
+  const [provisionExpired, setProvisionExpired] = useState(false);
+  const [provisionLost, setProvisionLost] = useState(false);
+  // appliedRef：终态只处理一次（toast / 重置表单 / 刷新列表），避免轮询反复触发
+  const appliedRef = useRef(false);
 
   async function fetchStatus() {
     try {
@@ -105,6 +121,74 @@ export default function Nginx() {
     setInitialLoading(true);
     Promise.all([fetchStatus(), fetchSites()]).finally(() => setInitialLoading(false));
   }, []);
+
+  // 开通进度轮询：创建期间每秒拉取只读快照，抵达终态或进度过期后自动停止。
+  // 依赖只取 opId，因此用户关掉进度弹窗后仍会继续刷新，列表不会停留在旧数据。
+  useEffect(() => {
+    const opId = provision?.opId;
+    if (!opId) return undefined;
+    let stopped = false;
+    let timer = null;
+
+    const handleTerminal = (snap) => {
+      if (appliedRef.current) return;
+      appliedRef.current = true;
+      // 创建请求可能已因反代超时（504）提前中断，此时靠终态快照补一次列表刷新
+      fetchSites();
+      if (snap.status !== 'done') return;
+      const output = snap.result || {};
+      const warnings = snap.warnings || [];
+      if (warnings.length > 0) {
+        toast(t('nginx.siteCreatedWarning', { warnings: warnings.join('；') }), 'warning');
+      } else {
+        toast(t('nginx.siteCreated', { name: output.name || snap.name }), 'success');
+      }
+      if (output.database?.password) {
+        toast(
+          t('nginx.dbCreated', {
+            dbName: output.database.dbName,
+            user: output.database.user,
+            password: output.database.password,
+          }),
+          'info'
+        );
+      }
+      if (output.defaultPage) {
+        toast(t('nginx.defaultPage', { path: output.defaultPage }), 'info');
+      }
+      setForm(EMPTY_FORM);
+      setRootTouched(false);
+    };
+
+    const tick = async () => {
+      const res = await getProvisionStatus(opId);
+      if (stopped) return;
+      if (res.ok) {
+        setProvisionExpired(false);
+        setProvisionLost(false);
+        if (res.provision) {
+          setProvision(res.provision);
+          if (res.provision.status !== 'running') {
+            handleTerminal(res.provision);
+            return;
+          }
+        }
+      } else if (res.expired) {
+        setProvisionExpired(true);
+        return;
+      } else {
+        // 单次查询失败多为网络抖动，保留轮询继续重试
+        setProvisionLost(true);
+      }
+      timer = setTimeout(tick, 1000);
+    };
+
+    timer = setTimeout(tick, 300);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [provision?.opId]);
 
   async function handleControl(action) {
     setLoading(true);
@@ -232,33 +316,39 @@ export default function Nginx() {
 
   async function handleCreateSite(e) {
     e.preventDefault();
+    const opId = genOpId();
+    const payload = { ...form, opId };
+    // 先切到进度弹窗：后端按「创建目录 → 部署 SSL → 创建数据库」逐步推进，前端轮询实时展示
+    appliedRef.current = false;
+    setProvisionForm(form);
+    setProvision({ opId, status: 'running', steps: [], name: form.name, domain: form.serverName });
+    setProvisionError('');
+    setProvisionExpired(false);
+    setProvisionLost(false);
+    setProvisionOpen(true);
+    setAddOpen(false);
     setCreating(true);
     try {
-      const data = await createNginxSite(form);
-      const output = data?.output || {};
-      const warnings = output.warnings || [];
-      if (warnings.length > 0) {
-        toast(t('nginx.siteCreatedWarning', { warnings: warnings.join('；') }), 'warning');
-      } else {
-        toast(t('nginx.siteCreated', { name: form.name }), 'success');
-      }
-      if (output.database?.password) {
-        toast(t('nginx.dbCreated', { dbName: output.database.dbName, user: output.database.user, password: output.database.password }), 'info');
-      }
-      if (output.defaultPage) {
-        toast(t('nginx.defaultPage', { path: output.defaultPage }), 'info');
-      }
-      setAddOpen(false);
-      setForm(EMPTY_FORM);
-      setRootTouched(false);
+      await createNginxSite(payload);
+      // 结果提示与表单重置统一由轮询的终态快照处理，避免重复提示
     } catch (err) {
-      toast(err?.message || String(err), 'error');
+      const message = err?.message || String(err);
+      setProvisionError(message);
+      toast(message, 'error');
     } finally {
       // 创建站点包含证书签发，整体耗时可能超过反向代理的读超时（表现为 504）。
       // 此时站点配置其实已落盘，所以无论成功还是失败都必须刷新列表，避免“要手动刷新才能看到站点”。
       await fetchSites();
       setCreating(false);
     }
+  }
+
+  // 从进度弹窗直接进入文件管理：列表可能尚未刷新，直接用快照里的站点信息构造
+  function handleViewProvisionFiles() {
+    const result = provision?.result;
+    if (!result?.root) return;
+    setProvisionOpen(false);
+    setFilesSite({ name: result.name, serverName: provision.domain, root: result.root });
   }
 
   // 数据库创建需要 MySQL 已运行，未运行时禁用并提示
@@ -599,6 +689,17 @@ export default function Nginx() {
       </GlassModal>
 
       <SiteFileBrowser site={filesSite} onClose={() => setFilesSite(null)} />
+
+      <ProvisionFlowModal
+        open={provisionOpen}
+        onClose={() => setProvisionOpen(false)}
+        form={provisionForm}
+        snapshot={provision}
+        postError={provisionError}
+        connLost={provisionLost}
+        expired={provisionExpired}
+        onViewFiles={handleViewProvisionFiles}
+      />
     </div>
   );
 }
