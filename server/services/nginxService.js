@@ -13,6 +13,10 @@ const SITE_DIR = path.join(servicesConfig.configDir, 'conf.d');
 // 子目录不会被加载，因此把配置移到此处即可让站点下线，同时保留文件便于随时重启
 const SITE_DISABLED_DIR = path.join(SITE_DIR, '.disabled');
 const SITE_NAME_RE = /^[A-Za-z0-9._-]+$/;
+// 停止站点时在原位置留下的占位页标记：占位页保留原 server_name 与监听端口，
+// 使该域名仍由本 server 块处理，否则请求会落到同端口上其它站点（域名串站）
+const STOP_PAGE_MARK = '# glass-panel:stopped-site';
+const STOP_PAGE_HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Service Stopped</title><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0f172a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}.card{max-width:520px;margin:24px;padding:48px 40px;text-align:center;border:1px solid rgba(255,255,255,.08);border-radius:20px;background:rgba(255,255,255,.03)}.code{font-size:13px;letter-spacing:.3em;color:#64748b}h1{margin:16px 0 8px;font-size:28px;font-weight:600}p{margin:0;color:#94a3b8;font-size:15px;line-height:1.7}</style></head><body><div class="card"><div class="code">503</div><h1>Service Stopped</h1><p>This website is currently unavailable.</p><p>The service has been stopped by the administrator. Please try again later.</p></div></body></html>';
 
 // 站点独立日志目录：与 Fail2ban 站点保护使用的路径、格式完全一致
 // （fail2banService.siteLogLines），两处写入同一行内容，重复注入时互相幂等
@@ -112,6 +116,13 @@ function parseServerBlocks(stdout, siteDir, fpmByListen = new Map()) {
     return current;
   };
 
+  // 停止占位页文件集合：标记写在文件头部，按 nginx -T 输出的文件分段识别
+  const stopPageFiles = new Set();
+  marks.forEach((item, idx) => {
+    const end = idx + 1 < marks.length ? marks[idx + 1].index : stdout.length;
+    if (stdout.slice(item.index, end).includes(STOP_PAGE_MARK)) stopPageFiles.add(item.file);
+  });
+
   // 用花括号配对切块：嵌套的 location / if 块内部的 } 不能当作 server 块结束，
   // 否则位于嵌套块之后的指令（如 Certbot 追加的 listen 443 ssl）会被漏读
   const blocks = [];
@@ -153,6 +164,7 @@ function parseServerBlocks(stdout, siteDir, fpmByListen = new Map()) {
       // 站点类型：有 proxy_pass 为反代，有 fastcgi_pass 为 PHP，其余为静态
       type: proxyPass ? 'proxy' : (fpmListen ? 'php' : 'html'),
       ssl: /ssl/.test(block.text),
+      stopped: stopPageFiles.has(file),
     };
 
     const key = `${file}|${serverName}`;
@@ -171,6 +183,7 @@ function parseServerBlocks(stdout, siteDir, fpmByListen = new Map()) {
     // 跳转块（return 301）本身不含业务指令，类型取有内容的那一块
     if (exist.type === 'html' && site.type !== 'html') exist.type = site.type;
     exist.ssl = exist.ssl || site.ssl;
+    exist.stopped = exist.stopped || site.stopped;
   }
   return merged;
 }
@@ -207,6 +220,7 @@ function parseConfigText(text, file, fpmByListen = new Map()) {
     phpVersion: fpmByListen.get(fpmListen) || '',
     type: proxyPass ? 'proxy' : (fpmListen ? 'php' : 'html'),
     ssl: /\bssl\b/.test(text),
+    stopped: text.includes(STOP_PAGE_MARK),
   };
 }
 
@@ -232,17 +246,25 @@ async function listDisabledSites(fpmByListen = new Map()) {
   return out;
 }
 
-// 站点列表 = nginx 当前加载的站点（enabled: true）+ 已停止站点（enabled: false）
-async function listSites() {
-  const fpmByListen = await buildFpmVersionMap();
-  let active = [];
+// 当前被 nginx 加载的 server 块（含停止占位页）：域名冲突检测以它为准，
+// 占位页同样占用域名与端口，新站点若同域名会被它遮蔽
+async function listLoadedSites(fpmByListen) {
   try {
     const { stdout } = await run('nginx', ['-T']);
-    active = parseServerBlocks(stdout, SITE_DIR, fpmByListen).map((site) => ({ ...site, enabled: true }));
+    return parseServerBlocks(stdout, SITE_DIR, fpmByListen);
   } catch (err) {
-    // nginx 未运行或命令不可用时，仍返回已停止站点，避免它们在列表中消失
-    active = [];
+    // nginx 未运行或命令不可用：视为没有已加载站点
+    return [];
   }
+}
+
+// 站点列表 = nginx 当前加载的站点（enabled: true）+ 已停止站点（enabled: false）。
+// 停止占位页不算独立站点，已停止站点由 .disabled 下的原配置代表，避免同一站点出现两条
+async function listSites() {
+  const fpmByListen = await buildFpmVersionMap();
+  const active = (await listLoadedSites(fpmByListen))
+    .filter((site) => !site.stopped)
+    .map((site) => ({ ...site, enabled: true }));
   return [...active, ...(await listDisabledSites(fpmByListen))];
 }
 
@@ -256,7 +278,7 @@ function listenPortSet(listen) {
 async function findDomainConflict(domain, selfName, ports) {
   const tokens = String(domain || '').split(/\s+/).map((d) => d.trim()).filter((d) => d && d !== '_' && !d.includes('*'));
   if (!tokens.length) return null;
-  const sites = await listSites();
+  const sites = await listLoadedSites(await buildFpmVersionMap());
   for (const site of sites) {
     if (site.name === selfName) continue;
     const names = String(site.serverName || '').split(/\s+/).map((d) => d.trim());
@@ -542,7 +564,7 @@ async function createSiteInner({
   if (conflict) {
     throw new Error(
       `域名冲突：${conflict.domain} 已被站点 ${conflict.site} 占用（${conflict.file}），`
-      + '同端口下 nginx 只会命中先加载的 server 块，新站点将被遮蔽。请先停用或删除该站点后重试'
+      + '同端口下 nginx 只会命中先加载的 server 块，新站点将被遮蔽。请先重启、停用或删除该站点后重试'
     );
   }
 
@@ -682,9 +704,13 @@ async function createSiteInner({
 // 汇总站点关联资源（数据库、证书），供删除前的确认弹窗展示
 async function getSiteRelations(siteName) {
   const { name: key, active, disabled } = sitePaths(siteName);
-  // 已停止的站点配置在 .disabled 目录，删除同样需要能定位到
-  const filePath = fs.existsSync(active) ? active : disabled;
-  if (!fs.existsSync(filePath)) throw new Error('站点配置文件不存在');
+  const activeExists = fs.existsSync(active);
+  const disabledExists = fs.existsSync(disabled);
+  if (!activeExists && !disabledExists) throw new Error('站点配置文件不存在');
+  // 已停止的站点：原配置在 .disabled，conf.d 下只剩停止占位页，站点配置以原配置为准
+  const filePath = disabledExists ? disabled : active;
+  // 停止占位页需与站点配置一并删除，否则域名会一直停留在停止页
+  const extraFiles = activeExists && isStopPageFile(active) ? [active] : [];
 
   const site = (await listSites()).find((item) => item.name === key);
   // 库名与证书名均按创建站点时的规则由首个域名推导，保证与创建时一致
@@ -694,6 +720,7 @@ async function getSiteRelations(siteName) {
   return {
     name: key,
     file: filePath,
+    extraFiles,
     serverName: site?.serverName || '',
     primaryDomain: primary,
     root: site?.root || '',
@@ -708,13 +735,16 @@ async function getSiteRelations(siteName) {
 async function deleteSite(siteName, { removeDb = true, removeSsl = true } = {}) {
   const relations = await getSiteRelations(siteName);
   const warnings = [];
-  // 临时改名而非直接删除：校验失败时用于还原站点配置
-  const rollbackPath = `${relations.file}.deleted.${Date.now()}`;
+  // 临时改名而非直接删除：校验失败时用于还原站点配置；
+  // 已停止的站点还需一并移除 conf.d 下的停止占位页，否则域名会停在停止页
+  const targets = [relations.file, ...(relations.extraFiles || [])];
+  const stamp = Date.now();
+  const moved = targets.map((from, idx) => ({ from, to: `${from}.deleted.${stamp}.${idx}` }));
 
-  await fs.promises.rename(relations.file, rollbackPath);
+  for (const item of moved) await fs.promises.rename(item.from, item.to);
   const test = await run('nginx', ['-t']);
   if (test.exitCode !== 0) {
-    await fs.promises.rename(rollbackPath, relations.file).catch(() => {});
+    for (const item of moved) await fs.promises.rename(item.to, item.from).catch(() => {});
     throw new Error(`配置校验失败，站点未删除：${(test.stderr || test.stdout || '').trim()}`);
   }
   await run('systemctl', ['reload', servicesConfig.service]);
@@ -749,7 +779,7 @@ async function deleteSite(siteName, { removeDb = true, removeSsl = true } = {}) 
     warnings.push(`证书删除后配置校验失败，请检查是否有其他站点引用该证书：${(finalTest.stderr || finalTest.stdout || '').trim().slice(0, 300)}`);
   }
 
-  await fs.promises.unlink(rollbackPath).catch(() => {});
+  for (const item of moved) await fs.promises.unlink(item.to).catch(() => {});
 
   return {
     name: relations.name,
@@ -773,19 +803,71 @@ function sitePaths(siteName) {
   };
 }
 
-// 停止站点：把配置移出 nginx 加载范围并重载，站点立即不再对外服务；
-// 校验或重载失败时把配置移回原位，保证不会把一个坏配置留在停用目录里
+// 停止占位页内容：保留原 server_name、监听端口与证书指令，只返回 503 停止页。
+// 证书指令必须保留，否则 443 端口会与其它站点的 listen 参数冲突导致 nginx -t 失败
+function buildStopPage(originalText) {
+  const uniq = (re) => [...new Set([...String(originalText || '').matchAll(re)].map((m) => m[1].trim()))];
+  const listens = uniq(/listen\s+([^;]+);/g);
+  const serverNames = uniq(/server_name\s+([^;]+);/g);
+  const keepRe = /^\s*(ssl_certificate|ssl_certificate_key|ssl_trusted_certificate|ssl_dhparam|ssl_protocols|ssl_ciphers|ssl_prefer_server_ciphers|ssl_session_cache|ssl_session_timeout|ssl_session_tickets|ssl_stapling)/;
+  const keep = String(originalText || '').split('\n').map((l) => l.trim()).filter((l) => keepRe.test(l));
+  return [
+    STOP_PAGE_MARK,
+    '# 站点已停止，此文件为占位页：保留域名与端口，避免请求落到同端口其它站点',
+    'server {',
+    ...listens.map((v) => `    listen ${v};`),
+    `    server_name ${serverNames.join(' ') || '_'};`,
+    ...keep.map((l) => `    ${l}`),
+    '    add_header Cache-Control "no-store" always;',
+    '    location / {',
+    '        default_type text/html;',
+    `        return 503 '${STOP_PAGE_HTML}';`,
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+}
+
+// 文件是否为停止占位页（只读头部标记，读取失败按「不是」处理）
+function isStopPageFile(filePath) {
+  try {
+    return fs.readFileSync(filePath, 'utf8').includes(STOP_PAGE_MARK);
+  } catch (err) {
+    return false;
+  }
+}
+
+// 停止站点：原配置移出 nginx 加载范围，原位置写入停止占位页并重载。
+// 占位页保留域名与端口，避免域名串到同端口其它站点；
+// 校验或重载失败时把原配置移回原位，保证不会把一个坏配置留在停用目录里
 async function stopSite(siteName) {
   const { name, active, disabled } = sitePaths(siteName);
-  if (!fs.existsSync(active)) {
-    if (fs.existsSync(disabled)) {
-      return { name, file: disabled, enabled: false, changed: false, reloaded: false };
+  const activeExists = fs.existsSync(active);
+  const disabledExists = fs.existsSync(disabled);
+  if (!activeExists && !disabledExists) throw new Error('站点配置文件不存在');
+
+  // 已停止但缺少占位页（旧版本停止的站点）：补写占位页，让域名不再串站
+  if (!activeExists) {
+    const originalText = await fs.promises.readFile(disabled, 'utf8');
+    await fs.promises.writeFile(active, buildStopPage(originalText), 'utf8');
+    const test = await run('nginx', ['-t']);
+    if (test.exitCode !== 0) {
+      await fs.promises.unlink(active).catch(() => {});
+      throw new Error(`停止页配置校验失败：${(test.stderr || test.stdout || '').trim().slice(0, 300)}`);
     }
-    throw new Error('站点配置文件不存在');
+    await run('systemctl', ['reload', servicesConfig.service]);
+    return { name, file: disabled, enabled: false, changed: true, reloaded: true };
   }
 
+  // 已停止且占位页就位：无需重复操作
+  if (disabledExists && isStopPageFile(active)) {
+    return { name, file: disabled, enabled: false, changed: false, reloaded: false };
+  }
+
+  const originalText = await fs.promises.readFile(active, 'utf8');
   await fs.promises.mkdir(SITE_DISABLED_DIR, { recursive: true });
   await fs.promises.rename(active, disabled);
+  await fs.promises.writeFile(active, buildStopPage(originalText), 'utf8');
 
   const test = await run('nginx', ['-t']);
   if (test.exitCode !== 0) {
@@ -802,30 +884,41 @@ async function stopSite(siteName) {
   return { name, file: disabled, enabled: false, changed: true, reloaded: true };
 }
 
-// 重启站点：已停止的站点恢复配置后重载；在线站点仅重载配置使其立即生效
+// 重启失败时恢复停止状态：原配置移回 .disabled，原位置写回停止占位页
+async function restoreStopPage(active, disabled, originalText) {
+  await fs.promises.rename(active, disabled).catch(() => {});
+  await fs.promises.writeFile(active, buildStopPage(originalText), 'utf8').catch(() => {});
+}
+
+// 重启站点：已停止的站点恢复配置（覆盖停止占位页）后重载；在线站点仅重载配置使其立即生效
 async function restartSite(siteName) {
   const { name, active, disabled } = sitePaths(siteName);
   const wasDisabled = fs.existsSync(disabled);
-  if (wasDisabled && fs.existsSync(active)) {
+  const activeExists = fs.existsSync(active);
+  // 停止占位页不算在线配置：只有非占位页的在线配置才算真冲突
+  const activeIsStopPage = activeExists && isStopPageFile(active);
+  if (wasDisabled && activeExists && !activeIsStopPage) {
     throw new Error('同名站点配置已在线，请先处理配置冲突');
   }
-  if (!wasDisabled && !fs.existsSync(active)) {
+  if (!wasDisabled && !activeExists) {
     throw new Error('站点配置文件不存在');
   }
 
+  let originalText = '';
   if (wasDisabled) {
+    originalText = await fs.promises.readFile(disabled, 'utf8');
     await fs.promises.mkdir(SITE_DIR, { recursive: true });
     await fs.promises.rename(disabled, active);
   }
 
   const test = await run('nginx', ['-t']);
   if (test.exitCode !== 0) {
-    if (wasDisabled) await fs.promises.rename(active, disabled).catch(() => {});
+    if (wasDisabled) await restoreStopPage(active, disabled, originalText);
     throw new Error(`配置校验失败，站点未重启：${(test.stderr || test.stdout || '').trim().slice(0, 300)}`);
   }
   const reload = await run('systemctl', ['reload', servicesConfig.service]);
   if (reload.exitCode !== 0) {
-    if (wasDisabled) await fs.promises.rename(active, disabled).catch(() => {});
+    if (wasDisabled) await restoreStopPage(active, disabled, originalText);
     throw new Error(`Nginx 重载失败：${(reload.stderr || reload.stdout || '').trim().slice(0, 300)}`);
   }
   return { name, file: active, enabled: true, changed: wasDisabled, reloaded: true };
