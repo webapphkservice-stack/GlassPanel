@@ -13,7 +13,7 @@ import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
 import GlassModal from '@/components/common/GlassModal';
 import {
-  Play, Square, RefreshCw, Server, Check, Package, Trash, Lock, FileText,
+  Play, Square, RefreshCw, Server, Check, Package, Trash, Lock, FileText, Terminal,
 } from '@/components/common/Icons';
 import { useUIStore } from '@/components/common/uiStore';
 
@@ -104,6 +104,8 @@ export default function Php() {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [jobKey, setJobKey] = useState('');
   const [job, setJob] = useState(null);
+  // 是否正在跟踪一个扩展安装任务（用于持续刷新列表，保住「查看进度」入口）
+  const [watchingJob, setWatchingJob] = useState(false);
   const logRef = useRef(null);
   const startedRef = useRef(false);
   const notifiedRef = useRef(false);
@@ -262,6 +264,22 @@ export default function Php() {
       setJobKey(res.job?.key || `php-ext-${version}-${ext.module}`);
       setJob(res.job);
       setTerminalOpen(true);
+      // 立即开始刷新列表，使卡片马上切到「查看进度」，关掉弹窗也不会丢入口
+      setWatchingJob(true);
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    }
+  }
+
+  // 重新打开进行中的扩展安装终端（关闭弹窗后仍可回到安装状态）
+  async function openJob(key) {
+    try {
+      const { job: latest } = await getPhpJob(key);
+      startedRef.current = false;
+      notifiedRef.current = true;
+      setJobKey(key);
+      setJob(latest);
+      setTerminalOpen(true);
     } catch (err) {
       toast(err?.message || String(err), 'error');
     }
@@ -338,6 +356,28 @@ export default function Php() {
     if (job.exitCode === 0) toast(t('apps.taskComplete', { label: job.label || '' }), 'success');
     else toast(t('apps.taskFailed', { label: job.label || '', code: job.exitCode }), 'error');
   }, [job, jobKey]);
+
+  // 扩展安装任务进行中：持续刷新扩展列表，保证卡片始终保留「查看进度」入口。
+  // 列表只在切页签时拉取，任务启动后不刷新的话卡片会一直停留在「安装」按钮，
+  // 用户关掉终端弹窗后就再也回不到运行状态；任务结束后自动停止并同步最终状态。
+  const anyJobRunning = (extData?.catalog || []).some((e) => e.jobRunning);
+  useEffect(() => {
+    if (!watchingJob && !anyJobRunning) return undefined;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const d = await getPhpExtensions(version);
+        if (cancelled) return;
+        setExtData(d);
+        if (!(d.catalog || []).some((e) => e.jobRunning)) setWatchingJob(false);
+      } catch (err) {
+        // 轮询失败不打断页面，等待下一次
+      }
+    };
+    tick();
+    const timer = setInterval(tick, POLL_INTERVAL);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [watchingJob, anyJobRunning, version]);
 
   useEffect(() => {
     if (terminalOpen && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -523,7 +563,14 @@ export default function Php() {
                     </div>
                     <p className="mt-2 flex-1 text-xs text-white/50">{ext.desc}</p>
                     <div className="mt-3">
-                      {canUninstall ? (
+                      {ext.jobRunning ? (
+                        <button
+                          onClick={() => openJob(ext.jobKey)}
+                          className="flex w-full items-center justify-center gap-2 rounded-lg border border-cyan-300/30 bg-cyan-400/10 py-1.5 text-xs text-cyan-200 hover:bg-cyan-400/20"
+                        >
+                          <Terminal className="w-3.5 h-3.5" /> {t('apps.viewProgress')}
+                        </button>
+                      ) : canUninstall ? (
                         <button
                           onClick={() => handleUninstallExt(ext)}
                           className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 py-1.5 text-xs text-rose-300 hover:bg-white/10"

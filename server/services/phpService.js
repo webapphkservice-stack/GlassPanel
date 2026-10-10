@@ -372,7 +372,15 @@ async function getExtensions(version) {
       const f = path.join(ctx.confD, `${ext.module}.ini`);
       if (fs.existsSync(f)) enabledFile = f;
     }
-    return { ...ext, installed: set.has(ext.module.toLowerCase()), enabledFile };
+    // 扩展安装任务 key 与 installExtension 保持一致，供前端在编译期间显示并重开「查看进度」
+    const jobKey = `php-ext-${ctx.item.version}-${ext.module}`;
+    return {
+      ...ext,
+      installed: set.has(ext.module.toLowerCase()),
+      enabledFile,
+      jobKey,
+      jobRunning: jobService.isRunning(jobKey),
+    };
   });
   return {
     version: ctx.item.version,
