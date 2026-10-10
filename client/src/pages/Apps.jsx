@@ -40,6 +40,8 @@ export default function Apps() {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [activeKey, setActiveKey] = useState('');
   const [job, setJob] = useState(null);
+  // 是否正在跟踪一个后台任务（用于持续刷新列表，保住「查看进度」入口）
+  const [watchingJob, setWatchingJob] = useState(false);
   const [xuiPort, setXuiPort] = useState('2255');
   const [xuiSource, setXuiSource] = useState('github');
   const [xuiDomain, setXuiDomain] = useState('');
@@ -99,6 +101,28 @@ export default function Apps() {
       toast(t('apps.taskFailed', { label: job.label || '', code: job.exitCode }), 'error');
     }
   }, [job, activeKey]);
+
+  // 后台任务进行中：持续刷新应用列表，保证卡片始终保留「查看进度」入口。
+  // 列表只在挂载时拉取一次，若任务启动后不刷新，卡片会一直停留在「安装」按钮，
+  // 用户关掉终端弹窗后就再也回不到运行状态；任务结束后自动停止并同步最终状态。
+  const anyJobRunning = (data.apps || []).some((a) => a.jobRunning);
+  useEffect(() => {
+    if (!watchingJob && !anyJobRunning) return undefined;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const d = await getApps();
+        if (cancelled) return;
+        setData(d);
+        if (!(d.apps || []).some((a) => a.jobRunning)) setWatchingJob(false);
+      } catch (err) {
+        // 轮询失败不打断页面，等待下一次
+      }
+    };
+    tick();
+    const timer = setInterval(tick, POLL_INTERVAL);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [watchingJob, anyJobRunning]);
 
   // 有新输出时自动滚动到底部
   useEffect(() => {
@@ -161,6 +185,8 @@ export default function Apps() {
       setJob(res.job);
       setTerminalOpen(true);
       setInstallOpen(false);
+      // 立即开始刷新列表，使卡片马上切到「查看进度」，关掉弹窗也不会丢入口
+      setWatchingJob(true);
     } catch (err) {
       toast(err?.message || String(err), 'error');
     } finally {
