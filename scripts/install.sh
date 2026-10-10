@@ -33,13 +33,43 @@ else
   error "不支持的系统，请使用 apt/yum/dnf 包管理器"
 fi
 
+# RHEL 系（含 Alibaba Cloud Linux 3）系统仓库不提供 nginx 包，
+# 与面板应用中心保持一致：写入 nginx.org 官方源（默认禁用）后临时启用安装
+install_nginx_rhel() {
+  if rpm -q nginx >/dev/null 2>&1; then
+    log "已检测到 nginx：$(nginx -v 2>&1)，跳过安装"
+    return 0
+  fi
+  # alinux 的 VERSION_ID 是 2/3/4，不能直接当 $releasever 用（nginx.org 只发布 el7/8/9），
+  # 需换算成 Enterprise Linux 大版本：alinux2=7、alinux3=8、alinux4=9
+  local el
+  el="$(. /etc/os-release 2>/dev/null; case "$ID" in alinux) echo $((VERSION_ID + 5)) ;; *) echo "${VERSION_ID%%.*}" ;; esac)"
+  [ -n "$el" ] || el=8
+  log "写入 nginx.org 官方源（el${el}）..."
+  cat > /etc/yum.repos.d/nginx-official.repo <<EOF
+[nginx-stable]
+name=nginx repo
+baseurl=https://nginx.org/packages/centos/${el}/\$basearch/
+gpgcheck=1
+enabled=0
+gpgkey=https://nginx.org/keys/nginx_signing.key
+# epel-modular 中存在同名 nginx 模块流，会按模块过滤隐藏这里的 nginx 包，
+# 必须声明 module_hotfixes 才能从官方源装到 nginx
+module_hotfixes=true
+EOF
+  rpm --import https://nginx.org/keys/nginx_signing.key || error "导入 nginx 官方 GPG 密钥失败"
+  $PKG install -y --enablerepo=nginx-stable nginx || error "从 nginx.org 官方源安装 nginx 失败"
+}
+
 # 安装基础依赖
+# 注意：RHEL 系的 sqlite3 命令由 sqlite 包提供，且系统仓库不含 nginx，需分别处理
 log "安装基础依赖..."
 if [ "$PKG" = "apt" ]; then
   apt update -y
   apt install -y curl wget git sqlite3 nginx
 else
-  $PKG install -y curl wget git sqlite3 nginx
+  $PKG install -y curl wget git sqlite
+  install_nginx_rhel
 fi
 
 # Node.js 版本约束：统一使用 24 LTS，可用 NODE_MAJOR 覆盖
@@ -113,16 +143,43 @@ log "Node 路径：$NODE_BIN"
 log "Node 版本：$("$NODE_BIN" -v)"
 log "NPM 版本：$(npm -v)"
 
+# node-gyp 需要 Python 3.8+（3.6 无法解析新版 gyp 的语法），
+# RHEL 系默认 python3 为 3.6，会导致 better-sqlite3 等原生模块编译失败，
+# 这里检查并按需安装平行版本 python3.11 交给 npm 使用
+ensure_python_for_gyp() {
+  local py
+  py="$(command -v python3 || true)"
+  if [ -n "$py" ] && "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' 2>/dev/null; then
+    return 0
+  fi
+  log "当前 python3 版本过低，安装 python3.11 供 node-gyp 使用..."
+  $PKG install -y python3.11 || error "安装 python3.11 失败"
+  # npm 11 不再接受自定义 python 配置项（会报 not a valid npm option），
+  # 改为通过 npm_config_python 环境变量传给 node-gyp
+  export npm_config_python=/usr/bin/python3.11
+}
+
 # 安装项目依赖
 log "安装项目依赖..."
+ensure_python_for_gyp
 cd "$REPO_DIR"
 npm run install:all
 
-# 原生模块（better-sqlite3）按 Node ABI 编译：Node 大版本变化后必须重编译，
-# 否则启动会报 NODE_MODULE_VERSION 不匹配
+# 原生模块 better-sqlite3 必须落到本机源码编译产物上：
+# 1) npm 包内置的预编译包（prebuilds/）要求 glibc>=2.33，Alibaba Cloud Linux 3 仅 2.32，
+#    加载会直接报 "GLIBC_2.33 not found"，而 lib/binding.js 会优先加载它；
+# 2) npm 11 默认不执行依赖的安装脚本，需先 install-scripts approve 授权，
+#    否则连编译都不会触发；
+# 3) Node 大版本变化后也必须重编译，否则报 NODE_MODULE_VERSION 不匹配
+BETTER_SQLITE_DIR="$REPO_DIR/server/node_modules/better-sqlite3"
 if ! (cd "$REPO_DIR/server" && "$NODE_BIN" -e "require('better-sqlite3')" >/dev/null 2>&1); then
-  log "重新编译原生模块 better-sqlite3..."
-  cd "$REPO_DIR/server" && npm rebuild better-sqlite3 || error "better-sqlite3 重编译失败"
+  log "从源码编译原生模块 better-sqlite3..."
+  cd "$REPO_DIR/server"
+  npm install-scripts approve better-sqlite3 >/dev/null 2>&1 || true
+  rm -f "$BETTER_SQLITE_DIR"/prebuilds/*.node
+  npm rebuild better-sqlite3 --build-from-source || error "better-sqlite3 编译失败"
+  rm -f "$BETTER_SQLITE_DIR"/prebuilds/*.node
+  "$NODE_BIN" -e "require('better-sqlite3')" >/dev/null 2>&1 || error "better-sqlite3 加载失败"
   cd "$REPO_DIR"
 fi
 
@@ -139,7 +196,20 @@ fi
 # 初始化管理员：安装脚本必须生成随机强密码，绝不使用默认密码
 log "初始化管理员账号..."
 ADMIN_USER="${ADMIN_USER:-admin}"
+ADMIN_PASS="${ADMIN_PASS:-}"
+# 重复执行安装脚本时沿用 .env 中已记录的凭据，避免回显的密码与已建账号不符
+# （.env 中仍是示例默认值 admin123 时视为尚未初始化）
+if [ -z "$ADMIN_PASS" ] && [ -f "$REPO_DIR/.env" ]; then
+  ADMIN_PASS="$(sed -n 's/^DEFAULT_ADMIN_PASSWORD=//p' "$REPO_DIR/.env" | head -1)"
+  [ "$ADMIN_PASS" = "admin123" ] && ADMIN_PASS=""
+fi
 ADMIN_PASS="${ADMIN_PASS:-$(openssl rand -hex 16)}"
+# 同步管理员凭据到 .env：生产环境下 config 会拒绝 admin/admin123 等弱默认值，
+# 不同步会导致 createAdmin 与面板服务启动时直接抛错退出
+if [ -f "$REPO_DIR/.env" ]; then
+  sed -i "s|^DEFAULT_ADMIN_USERNAME=.*|DEFAULT_ADMIN_USERNAME=$ADMIN_USER|" "$REPO_DIR/.env"
+  sed -i "s|^DEFAULT_ADMIN_PASSWORD=.*|DEFAULT_ADMIN_PASSWORD=$ADMIN_PASS|" "$REPO_DIR/.env"
+fi
 cd "$REPO_DIR/server" && node scripts/createAdmin.js "$ADMIN_USER" "$ADMIN_PASS"
 echo ""
 echo "============================================================"
