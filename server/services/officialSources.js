@@ -44,7 +44,10 @@ async function configureNginx(release) {
     `baseurl=https://nginx.org/packages/centos/${el}/$basearch/\n` +
     'gpgcheck=1\n' +
     'enabled=0\n' +
-    'gpgkey=https://nginx.org/keys/nginx_signing.key\n';
+    'gpgkey=https://nginx.org/keys/nginx_signing.key\n' +
+    // epel-modular 中存在同名 nginx 模块流（nginx:mainline），会按模块过滤隐藏
+    // 此处的 nginx 包，导致「无可用 nginx 包」；声明 module_hotfixes 可绕过模块过滤
+    'module_hotfixes=true\n';
   fs.writeFileSync('/etc/yum.repos.d/nginx-official.repo', content, 'utf8');
   await run('dnf', ['clean', 'all'], { timeout: 60000 });
   return { repo };
