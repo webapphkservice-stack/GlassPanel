@@ -586,6 +586,31 @@ function mysqlDowngradeHealLines() {
   ];
 }
 
+// MySQL root 凭据初始化：官方包（RPM/DEB）安装后 root@localhost 会带一个随机临时密码
+// 且处于过期状态，而面板一律以「免密 root」执行 SQL（mysqlService），不初始化就会让
+// 建库/删库/授权全部 Access denied——表现为勾选「同时创建 MySQL 数据库」却静默失败。
+// 这里在服务启动后自检：仍不免密时用初始临时密码把 root 切到 auth_socket
+// （面板以 root 身份调用 mysql，走 unix socket 即可免密），失败仅提示、不中断安装任务。
+function mysqlRootInitLines() {
+  return [
+    '',
+    'if ! mysql -N -B -e "SELECT 1" >/dev/null 2>&1; then',
+    '  TMPPW=$(grep -h "temporary password" /var/log/mysqld.log 2>/dev/null | tail -1 | sed "s/.*: //")',
+    '  if [ -n "$TMPPW" ]; then',
+    '    echo "[面板] 初始化 MySQL root 访问权限（临时密码 → auth_socket）..."',
+    '    NEWPW="Gp$(openssl rand -hex 8)Aa1!"',
+    '    mysql --connect-expired-password -u root -p"$TMPPW" -e "ALTER USER \'root\'@\'localhost\' IDENTIFIED BY \'$NEWPW\';" >/dev/null 2>&1 || true',
+    '    mysql -u root -p"$NEWPW" -e "INSTALL PLUGIN auth_socket SONAME \'auth_socket.so\'; ALTER USER \'root\'@\'localhost\' IDENTIFIED WITH auth_socket;" >/dev/null 2>&1 || true',
+    '  fi',
+    '  if mysql -N -B -e "SELECT 1" >/dev/null 2>&1; then',
+    '    echo "[面板] MySQL root 已可免密访问，数据库功能就绪"',
+    '  else',
+    '    echo "[提示] MySQL root 仍不可免密访问，请先执行 mysql_secure_installation，否则面板无法创建数据库"',
+    '  fi',
+    'fi',
+  ];
+}
+
 // 启用并启动服务的脚本片段（失败仅提示，不中断任务）
 function enableServiceLines(service, key) {
   if (!service) return [];
@@ -596,7 +621,10 @@ function enableServiceLines(service, key) {
     `  echo "[提示] 服务 ${service} 启动失败，可在对应页面手动启动"`,
     'fi',
   ];
-  if (key === 'mysql') lines.push(...mysqlDowngradeHealLines());
+  if (key === 'mysql') {
+    lines.push(...mysqlDowngradeHealLines());
+    lines.push(...mysqlRootInitLines());
+  }
   return lines;
 }
 

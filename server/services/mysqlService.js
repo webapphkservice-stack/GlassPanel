@@ -3,7 +3,9 @@ const { run } = require('./commandRunner');
 
 const IDENT_RE = /^[A-Za-z0-9_]+$/;
 const PASSWORD_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
-const PASSWORD_RE = /^[A-Za-z0-9]+$/;
+// 特殊字符只取 ASCII 中对 SQL 单引号字面量安全的符号，避免生成后还需额外转义
+const PASSWORD_SPECIALS = '!@#%^*_-+=';
+const PASSWORD_RE = /^[A-Za-z0-9!@#%^*_\-+=]+$/;
 
 // 由域名派生合法的数据库名/用户名：abc.com -> abc_com
 function normalizeName(domain) {
@@ -16,13 +18,24 @@ function normalizeName(domain) {
   return name.slice(0, 32);
 }
 
+// MySQL 8.0+ 默认启用 validate_password(MEDIUM)：密码必须同时含大写、小写、数字和特殊字符，
+// 否则 CREATE USER 会直接报「密码不满足当前策略」，因此四类字符都要保证至少出现一次
 function generatePassword(length = 20) {
-  const bytes = crypto.randomBytes(length);
-  let out = '';
-  for (let i = 0; i < length; i += 1) {
-    out += PASSWORD_CHARS[bytes[i] % PASSWORD_CHARS.length];
+  const pick = (chars) => chars[crypto.randomBytes(1)[0] % chars.length];
+  const out = [
+    pick('ABCDEFGHJKLMNPQRSTUVWXYZ'),
+    pick('abcdefghijkmnopqrstuvwxyz'),
+    pick('23456789'),
+    pick(PASSWORD_SPECIALS),
+  ];
+  const pool = PASSWORD_CHARS + PASSWORD_SPECIALS;
+  while (out.length < length) out.push(pick(pool));
+  // 打乱顺序，避免前四位固定为「大写+小写+数字+特殊字符」
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = crypto.randomBytes(1)[0] % (i + 1);
+    [out[i], out[j]] = [out[j], out[i]];
   }
-  return out;
+  return out.join('');
 }
 
 // MySQL 的 systemd 单元名随发行版不同（alinux/RHEL 为 mysqld、Debian 系为 mysql），
