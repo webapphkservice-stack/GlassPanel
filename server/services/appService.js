@@ -41,6 +41,7 @@ const INSTALL_MARKERS = {
   ffmpeg: '/opt/glass-panel/data/ffmpeg-compiled-version',
   fail2ban: '/opt/glass-panel/data/fail2ban-compiled-version',
   '3x-ui': '/opt/glass-panel/data/3xui-version',
+  gogs: '/opt/glass-panel/data/gogs-version',
 };
 const PHP_COMPILE_MARKER = INSTALL_MARKERS.php;
 
@@ -204,6 +205,276 @@ function xuiUninstallLines() {
     'rm -f /opt/glass-panel/data/3xui-version /opt/glass-panel/data/3xui-port /opt/glass-panel/data/3xui-gateway.json',
     'systemctl daemon-reload',
     'echo "=== 3x-ui 卸载完成 ==="',
+  ];
+}
+
+// ---- Gogs（自托管 Git 服务）----
+const GOGS_DIR = '/usr/local/gogs';
+const GOGS_DATA_DIR = '/var/lib/gogs';
+const GOGS_PORT_FILE = '/opt/glass-panel/data/gogs-port';
+const GOGS_HOST_FILE = '/opt/glass-panel/data/gogs-host';
+const GOGS_DEFAULT_PORT = '3000';
+
+let gogsReleasesCache = null;
+let gogsReleasesCacheAt = 0;
+const GOGS_CACHE_TTL = 5 * 60 * 1000;
+
+// GitHub Release 只保留正式版本（v0.14.3），排除 rc / dev / latest-commit-build
+async function fetchGogsReleases() {
+  const now = Date.now();
+  if (gogsReleasesCache && now - gogsReleasesCacheAt < GOGS_CACHE_TTL) {
+    return gogsReleasesCache;
+  }
+  const result = await run('curl', [
+    '-fsSL', '-A', 'glass-panel',
+    'https://api.github.com/repos/gogs/gogs/releases?per_page=30',
+  ], { timeout: 60000 });
+  if (result.exitCode !== 0) {
+    throw new Error('无法获取 Gogs 发行版本：' + (result.stderr || result.stdout || '网络错误'));
+  }
+  let data;
+  try {
+    data = JSON.parse(result.stdout);
+  } catch (e) {
+    throw new Error('解析 Gogs 发行版本失败');
+  }
+  const versions = (Array.isArray(data) ? data : [])
+    .map((r) => String(r.tag_name || ''))
+    .filter((tag) => /^v\d+\.\d+\.\d+$/.test(tag));
+  gogsReleasesCache = versions;
+  gogsReleasesCacheAt = now;
+  return versions;
+}
+
+async function fetchGogsLatest() {
+  return (await fetchGogsReleases())[0] || '';
+}
+
+// 发行包的命名规则随版本变化（0.13 为 gogs_0.13.4_…，0.14 为 gogs_v0.14.3_…），
+// 直接从 Release 资产里挑选当前架构的 tar.gz，避免按规则拼出 404 地址
+async function fetchGogsDownloadUrl(tag, arch) {
+  const result = await run('curl', [
+    '-fsSL', '-A', 'glass-panel',
+    `https://api.github.com/repos/gogs/gogs/releases/tags/${tag}`,
+  ], { timeout: 60000 });
+  if (result.exitCode === 0) {
+    try {
+      const assets = (JSON.parse(result.stdout).assets || [])
+        .map((a) => String(a.browser_download_url || ''))
+        .filter(Boolean);
+      const hit = assets.find((url) => url.endsWith(`_linux_${arch}.tar.gz`));
+      if (hit) return hit;
+    } catch (e) {
+      // 解析失败则退回官方下载站地址
+    }
+  }
+  const version = String(tag).replace(/^v/, '');
+  return `https://dl.gogs.io/${version}/gogs_${version}_linux_${arch}.tar.gz`;
+}
+
+async function detectGoArch() {
+  const result = await run('uname', ['-m']);
+  const arch = (result.stdout || '').trim();
+  if (arch === 'x86_64' || arch === 'amd64') return 'amd64';
+  if (arch === 'aarch64' || arch === 'arm64') return 'arm64';
+  return '386';
+}
+
+function readGogsPort() {
+  try {
+    const p = fs.readFileSync(GOGS_PORT_FILE, 'utf8').trim();
+    if (p) return p;
+  } catch (e) {
+    // ignore
+  }
+  return GOGS_DEFAULT_PORT;
+}
+
+// 安装脚本写入的对外访问 IP，用于「打开面板」按钮（hostname -I 在容器环境可能只有内网地址）
+function readGogsHost() {
+  try {
+    return fs.readFileSync(GOGS_HOST_FILE, 'utf8').trim();
+  } catch (e) {
+    return '';
+  }
+}
+
+// Gogs 为单一 Go 二进制 + SQLite，安装与更新共用同一脚本：
+// 替换程序本体、保留 custom/conf 与 /var/lib/gogs 数据，更新时管理员与仓库不受影响
+function buildGogsInstallScript(tag, port, downloadUrl) {
+  const version = String(tag).replace(/^v/, '');
+  return `#!/usr/bin/env bash
+set -e
+VERSION="${version}"
+PORT="${port}"
+DOWNLOAD_URL="${downloadUrl}"
+echo "=== 安装 Gogs \${VERSION}（端口 \${PORT}）==="
+# git 是 Gogs 操作仓库的必需组件
+if ! command -v git >/dev/null 2>&1; then
+  if command -v dnf >/dev/null 2>&1; then dnf -y install git >/dev/null; else yum -y install git >/dev/null; fi
+fi
+# 运行用户：仓库与 SSH 公钥都由该用户持有
+if ! id -u git >/dev/null 2>&1; then
+  useradd -r -m -d /home/git -s /bin/bash git
+fi
+mkdir -p "${GOGS_DIR}" "${GOGS_DATA_DIR}/repositories" "${GOGS_DATA_DIR}/data" \
+  "${GOGS_DATA_DIR}/attachments" "${GOGS_DATA_DIR}/avatars" "${GOGS_DATA_DIR}/log" /home/git/.ssh
+
+# clone 地址使用服务器公网 IP，优先外部回显地址，失败再取出口 IP
+HOST="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+[ -n "\$HOST" ] || HOST="$(ip route get 1.1.1.1 2>/dev/null | awk '{print \$7}' | head -1)"
+[ -n "\$HOST" ] || HOST="$(hostname -I 2>/dev/null | awk '{print \$1}')"
+[ -n "\$HOST" ] || HOST="127.0.0.1"
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "\$WORK"' EXIT
+# 安装包缓存：Gogs 体积约 40MB，国际链路较慢时支持断点续传，重试无需从头下载
+CACHE_DIR="/var/cache/glass-panel"
+CACHE_FILE="\$CACHE_DIR/\$(basename "\$DOWNLOAD_URL")"
+mkdir -p "\$CACHE_DIR"
+if [ -s "\$CACHE_FILE" ]; then
+  echo "[面板] 使用已缓存的安装包：\$CACHE_FILE"
+else
+  echo "[面板] 下载 Gogs \${VERSION}：\${DOWNLOAD_URL}"
+  if ! curl -fSL -C - -A "glass-panel" -o "\$CACHE_FILE.part" "\$DOWNLOAD_URL"; then
+    echo "[面板] 下载 Gogs \${VERSION} 失败：请确认该版本已发布且服务器可访问 GitHub"
+    exit 1
+  fi
+  mv -f "\$CACHE_FILE.part" "\$CACHE_FILE"
+fi
+tar xzf "\$CACHE_FILE" -C "\$WORK"
+SRC="\$WORK/gogs"
+[ -d "\$SRC" ] || SRC="\$WORK"
+# 保留已有 custom 配置：只复制程序文件，不覆盖 app.ini
+if [ -d "\$SRC/custom" ]; then
+  cp -rf "\$SRC/custom/." "${GOGS_DIR}/custom/" 2>/dev/null || true
+fi
+for item in gogs templates public scripts languages conf; do
+  if [ -e "\$SRC/\$item" ]; then
+    rm -rf "${GOGS_DIR}/\$item"
+    cp -rf "\$SRC/\$item" "${GOGS_DIR}/"
+  fi
+done
+chmod +x "${GOGS_DIR}/gogs"
+
+# 首次安装生成配置；INSTALL_LOCK=false 保留一次网页初始化，用于创建管理员账号
+# 同时保留 0.13 与 0.14 的配置键（ROOT_URL/EXTERNAL_URL、DB_TYPE/TYPE），便于从版本列表任选版本安装
+mkdir -p "${GOGS_DIR}/custom/conf"
+if [ ! -f "${GOGS_DIR}/custom/conf/app.ini" ]; then
+  SECRET_KEY="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+  cat > "${GOGS_DIR}/custom/conf/app.ini" <<EOS
+APP_NAME = Gogs
+BRAND_NAME = Gogs
+RUN_USER = git
+RUN_MODE = prod
+
+[server]
+PROTOCOL = http
+DOMAIN = \$HOST
+ROOT_URL = http://\$HOST:\${PORT}/
+EXTERNAL_URL = http://\$HOST:\${PORT}/
+HTTP_ADDR = 0.0.0.0
+HTTP_PORT = \${PORT}
+APP_DATA_PATH = ${GOGS_DATA_DIR}/data
+OFFLINE_MODE = true
+START_SSH_SERVER = true
+SSH_DOMAIN = \$HOST
+SSH_PORT = 3022
+SSH_LISTEN_PORT = 3022
+SSH_ROOT_PATH = /home/git/.ssh
+
+[database]
+DB_TYPE = sqlite3
+TYPE = sqlite3
+PATH = ${GOGS_DATA_DIR}/gogs.db
+
+[repository]
+ROOT = ${GOGS_DATA_DIR}/repositories
+
+[picture]
+AVATAR_UPLOAD_PATH = ${GOGS_DATA_DIR}/avatars
+DISABLE_GRAVATAR = true
+
+[attachment]
+PATH = ${GOGS_DATA_DIR}/attachments
+
+[log]
+ROOT_PATH = ${GOGS_DATA_DIR}/log
+MODE = file
+LEVEL = Info
+
+[session]
+PROVIDER = file
+PROVIDER_CONFIG = ${GOGS_DATA_DIR}/data/sessions
+
+[security]
+INSTALL_LOCK = false
+SECRET_KEY = \$SECRET_KEY
+EOS
+else
+  # 已存在配置时只同步端口，避免更新覆盖用户的其它设置
+  sed -i "s/^HTTP_PORT = .*/HTTP_PORT = \${PORT}/" "${GOGS_DIR}/custom/conf/app.ini"
+fi
+
+chown -R git:git "${GOGS_DIR}" "${GOGS_DATA_DIR}" /home/git/.ssh
+
+cat > /etc/systemd/system/gogs.service <<EOS
+[Unit]
+Description=Gogs Git Service
+After=network.target
+
+[Service]
+Type=simple
+User=git
+Group=git
+WorkingDirectory=${GOGS_DIR}
+ExecStart=${GOGS_DIR}/gogs web
+Restart=always
+RestartSec=3
+Environment=USER=git
+Environment=HOME=/home/git
+Environment=GOGS_WORK_DIR=${GOGS_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOS
+systemctl daemon-reload
+systemctl enable gogs >/dev/null 2>&1 || true
+systemctl restart gogs
+sleep 2
+STATUS="$(systemctl is-active gogs 2>/dev/null || true)"
+echo "[面板] Gogs 服务状态：\${STATUS}"
+if [ "\$STATUS" != "active" ]; then
+  echo "[面板] Gogs 启动失败，最近日志："
+  journalctl -u gogs -n 40 --no-pager 2>/dev/null || true
+  exit 1
+fi
+
+mkdir -p /opt/glass-panel/data
+echo "\${VERSION}" > /opt/glass-panel/data/gogs-version
+echo "\${PORT}" > "${GOGS_PORT_FILE}"
+echo "\$HOST" > "${GOGS_HOST_FILE}"
+echo "=== Gogs 安装完成：http://\${HOST}:\${PORT}/ ==="
+echo "[面板] 首次访问将进入安装向导，请按页面提示创建管理员账号（数据库等选项已预填）"
+`;
+}
+
+function gogsUninstallLines() {
+  return [
+    'echo "=== 卸载 Gogs ==="',
+    'systemctl stop gogs 2>/dev/null || true',
+    'systemctl disable gogs 2>/dev/null || true',
+    'rm -f /etc/systemd/system/gogs.service',
+    'systemctl daemon-reload',
+    'echo "[面板] 删除程序目录 /usr/local/gogs"',
+    'rm -rf /usr/local/gogs',
+    'echo "[面板] 删除数据目录 /var/lib/gogs（仓库、附件、SQLite 数据库）"',
+    'rm -rf /var/lib/gogs',
+    'echo "[面板] 删除版本与访问信息标记"',
+    'rm -f /opt/glass-panel/data/gogs-version /opt/glass-panel/data/gogs-port /opt/glass-panel/data/gogs-host',
+    'echo "[面板] 删除安装包缓存"',
+    'rm -f /var/cache/glass-panel/gogs_*.tar.gz /var/cache/glass-panel/gogs_*.tar.gz.part',
+    'echo "=== Gogs 卸载完成（git 系统用户与 /home/git 保留，避免影响其它 Git 用途）==="',
   ];
 }
 
@@ -1262,6 +1533,16 @@ async function buildInstallScript(key, version, config = {}) {
     return { script: build3xuiInstallScript(tag, port), label: `安装 3x-ui ${tag}` };
   }
 
+  // Gogs：GitHub Release 二进制包，安装与更新共用同一脚本（保留配置与仓库数据）
+  if (key === 'gogs') {
+    let tag = version;
+    if (!tag || tag === 'latest') tag = await fetchGogsLatest();
+    if (!tag) throw new Error('无法获取 Gogs 最新版本');
+    const port = String(config.port || readGogsPort() || GOGS_DEFAULT_PORT);
+    const downloadUrl = await fetchGogsDownloadUrl(tag, await detectGoArch());
+    return { script: buildGogsInstallScript(tag, port, downloadUrl), label: `安装 Gogs ${String(tag).replace(/^v/, '')}` };
+  }
+
   const pkg = detectPkgManager();
   const officialSelected = /^官方:(.+)$/.exec(String(version || ''));
 
@@ -1595,6 +1876,18 @@ const APPS = [
     icon: 'Shield',
   },
   {
+    key: 'gogs',
+    name: 'Gogs',
+    desc: '轻量级自托管 Git 服务',
+    package: null,
+    officialPackage: null,
+    hasOfficial: false,
+    service: 'gogs',
+    versionCmd: null,
+    page: null,
+    icon: 'GitBranch',
+  },
+  {
     key: '3x-ui',
     name: '3x-ui',
     desc: 'Xray 代理面板，支持多协议多用户管理',
@@ -1704,6 +1997,14 @@ async function listAppVersions(key) {
       cached,
     };
   }
+  // Gogs：从 GitHub Release 拉取可选版本
+  if (key === 'gogs') {
+    return {
+      versionCmdBin: null,
+      pkgVersionSyntax: 'dash',
+      versions: await fetchGogsReleases(),
+    };
+  }
   const pkg = detectPkgManager();
   let versions = [];
   let result;
@@ -1797,6 +2098,42 @@ async function listApps() {
         updateAvailable: info.count > 0,
         latestVersion: '',
         jobRunning: jobService.isRunning(app.key),
+      });
+      continue;
+    }
+    // Gogs：GitHub Release 管理的独立 systemd 服务
+    if (app.key === 'gogs') {
+      const marker = readMarker(app.key);
+      const installed = !!marker || fs.existsSync(`${GOGS_DIR}/gogs`);
+      const status = installed ? await getServiceStatus(app.service) : 'inactive';
+      let latestVersion = '';
+      let updateAvailable = false;
+      if (marker) {
+        try {
+          latestVersion = (await fetchGogsLatest()).replace(/^v/, '');
+          updateAvailable = !!latestVersion && compareVersions(latestVersion, marker) > 0;
+        } catch (e) {
+          // 网络异常时不影响卡片展示
+        }
+      }
+      const host = readGogsHost();
+      const port = readGogsPort();
+      apps.push({
+        key: app.key,
+        name: app.name,
+        desc: app.desc,
+        package: app.package,
+        page: app.page,
+        icon: app.icon,
+        hasService: true,
+        installed,
+        version: marker || '',
+        status,
+        updateAvailable,
+        latestVersion: updateAvailable ? latestVersion : '',
+        jobRunning: jobService.isRunning(app.key),
+        port: installed ? port : undefined,
+        openUrl: installed && host ? `http://${host}:${port}/` : '',
       });
       continue;
     }
@@ -2056,6 +2393,21 @@ exit "$UPDATE_RC"
 `;
     return jobService.start({ key: app.key, label: '系统更新', script });
   }
+  // Gogs：跟随 GitHub Release 更新，保留端口、配置与仓库数据
+  if (key === 'gogs') {
+    const installed = readMarker(key);
+    if (!installed) throw new Error('Gogs 尚未安装');
+    const latest = await fetchGogsLatest();
+    if (!latest) throw new Error('无法获取 Gogs 最新版本');
+    const target = latest.replace(/^v/, '');
+    if (compareVersions(target, installed) <= 0) throw new Error(`Gogs 已是最新版本（${installed}）`);
+    const downloadUrl = await fetchGogsDownloadUrl(latest, await detectGoArch());
+    return jobService.start({
+      key,
+      label: `更新 Gogs 至 ${target}`,
+      script: buildGogsInstallScript(latest, readGogsPort(), downloadUrl),
+    });
+  }
   // 3x-ui：跟随 GitHub Release 更新，保留当前端口
   if (key === '3x-ui') {
     const installed = readMarker(key);
@@ -2118,6 +2470,14 @@ async function startUninstall(key) {
   if (!app) throw new Error('未知应用');
   if (app.systemUpdate) throw new Error('系统更新不支持卸载');
   if (jobService.isRunning(key)) throw new Error(`${app.name} 正在执行任务中，请等待当前任务完成`);
+  // Gogs：二进制 + SQLite，卸载时清理程序、数据目录与标记
+  if (key === 'gogs') {
+    return jobService.start({
+      key,
+      label: `卸载 ${app.name}`,
+      script: `#!/usr/bin/env bash\n${gogsUninstallLines().join('\n')}\n`,
+    });
+  }
   // 3x-ui：使用官方卸载清理逻辑
   if (key === '3x-ui') {
     return jobService.start({

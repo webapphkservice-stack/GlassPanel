@@ -8,10 +8,10 @@ import LiquidButton from '@/components/common/LiquidButton';
 import StatusBadge from '@/components/common/StatusBadge';
 import LoadingState from '@/components/common/LoadingState';
 import GlassModal from '@/components/common/GlassModal';
-import { Globe, Server, Database, Cpu, Activity, Film, Package, Download, Trash, Check, ChevronDown, RefreshCw, Terminal, Shield, Box, ExternalLink, AlertTriangle } from '@/components/common/Icons';
+import { Globe, Server, Database, Cpu, Activity, Film, Package, Download, Trash, Check, ChevronDown, RefreshCw, Terminal, Shield, Box, GitBranch, ExternalLink, AlertTriangle } from '@/components/common/Icons';
 import { useUIStore } from '@/components/common/uiStore';
 
-const iconMap = { Globe, Server, Database, Cpu, Activity, Film, RefreshCw, Shield, Box };
+const iconMap = { Globe, Server, Database, Cpu, Activity, Film, RefreshCw, Shield, Box, GitBranch };
 
 // 需源码编译安装的版本（无二进制包，安装耗时较长）
 const LONG_BUILD_VERSIONS = {
@@ -372,7 +372,7 @@ export default function Apps() {
                         <LiquidButton variant="ghost" className="w-full justify-center"><Package className="w-4 h-4" /> {t('common.manage')}</LiquidButton>
                       </a>
                     )}
-                    {app.key === '3x-ui' && app.openUrl && (
+                    {app.openUrl && (
                       <a
                         href={app.openUrl}
                         target="_blank"

@@ -16,6 +16,17 @@ export function Box({ className }) {
   );
 }
 
+export function GitBranch({ className }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+      <circle cx="6" cy="5" r="2.5" />
+      <circle cx="6" cy="19" r="2.5" />
+      <circle cx="18" cy="7" r="2.5" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 7.5v9M18 9.5c0 3.5-3 4.5-6 4.5H6" />
+    </svg>
+  );
+}
+
 export function AlertTriangle({ className }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
