@@ -898,11 +898,41 @@ async function deleteSite(siteName, { removeDb = true, removeSsl = true } = {}) 
 
   for (const item of moved) await fs.promises.unlink(item.to).catch(() => {});
 
+  // 清理历史配置备份（<file>.<ts>.bak / <file>.bak.<ts>），避免留下不可见残留
+  try {
+    const bakPrefix = `${path.basename(relations.file)}.`;
+    const bakFiles = fs.readdirSync(SITE_DIR)
+      .filter((f) => f.startsWith(bakPrefix) && f.includes('.bak'))
+      .map((f) => path.join(SITE_DIR, f));
+    for (const f of bakFiles) await fs.promises.unlink(f).catch(() => {});
+  } catch (err) {
+    warnings.push(`历史备份清理失败：${err.message}`);
+  }
+
+  // 清理站点根目录：仅限 /var/www 下的一级目录，防止误删其它路径
+  let rootDeleted = false;
+  const root = (relations.root || '').replace(/\/+$/, '');
+  if (root.startsWith('/var/www/') && root.split('/').length >= 4) {
+    try {
+      const st = fs.lstatSync(root);
+      if (st.isDirectory()) {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      } else {
+        // 符号链接等非目录：只删链接本身，不动指向的目标
+        await fs.promises.unlink(root);
+      }
+      rootDeleted = true;
+    } catch (err) {
+      warnings.push(`站点根目录删除失败：${err.message}`);
+    }
+  }
+
   return {
     name: relations.name,
     file: relations.file,
     serverName: relations.serverName,
     root: relations.root,
+    rootDeleted,
     database,
     certificate,
     warnings,
