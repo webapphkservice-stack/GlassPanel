@@ -6,6 +6,7 @@ import {
   getPhpExtensions, installPhpExtension, uninstallPhpExtension, getPhpJob,
   getPhpLogs, clearPhpLogs, setPhpSlowlog,
 } from '@/api/php';
+import { installApp, getAppVersions } from '@/api/apps';
 import GlassCard from '@/components/common/GlassCard';
 import LiquidButton from '@/components/common/LiquidButton';
 import StatusBadge from '@/components/common/StatusBadge';
@@ -13,7 +14,7 @@ import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
 import GlassModal from '@/components/common/GlassModal';
 import {
-  Play, Square, RefreshCw, Server, Check, Package, Trash, Lock, FileText, Terminal,
+  Play, Square, RefreshCw, Server, Check, Package, Trash, Lock, FileText, Terminal, Download,
 } from '@/components/common/Icons';
 import { useUIStore } from '@/components/common/uiStore';
 
@@ -106,6 +107,12 @@ export default function Php() {
   const [job, setJob] = useState(null);
   // 是否正在跟踪一个扩展安装任务（用于持续刷新列表，保住「查看进度」入口）
   const [watchingJob, setWatchingJob] = useState(false);
+  // 安装其他版本（从应用中心移入本页）
+  const [installOpen, setInstallOpen] = useState(false);
+  const [installVersions, setInstallVersions] = useState([]);
+  const [installVersion, setInstallVersion] = useState('');
+  const [installVersionsLoading, setInstallVersionsLoading] = useState(false);
+  const [installStarting, setInstallStarting] = useState(false);
   const logRef = useRef(null);
   const startedRef = useRef(false);
   const notifiedRef = useRef(false);
@@ -256,6 +263,47 @@ export default function Php() {
     applySettings(patch, t('php.configSaved'));
   }
 
+  // 安装其他版本：拉取可选版本列表并弹窗（默认选中尚未安装的版本）
+  async function openInstallOtherVersion() {
+    setInstallOpen(true);
+    setInstallVersionsLoading(true);
+    try {
+      const d = await getAppVersions('php');
+      const list = d.versions || [];
+      setInstallVersions(list);
+      const installed = (data.versions || []).map((v) => v.version);
+      const notInstalled = list.find((v) => {
+        const rel = v.replace('官方:', '');
+        return !installed.some((i) => i === rel || i.startsWith(`${rel}.`));
+      });
+      setInstallVersion(notInstalled || list[0] || '');
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+      setInstallOpen(false);
+    } finally {
+      setInstallVersionsLoading(false);
+    }
+  }
+
+  async function handleInstallOtherVersion(e) {
+    e.preventDefault();
+    if (!installVersion) return;
+    setInstallStarting(true);
+    try {
+      const res = await installApp('php', installVersion);
+      startedRef.current = true;
+      notifiedRef.current = false;
+      setJobKey(res.job?.key || 'php');
+      setJob(res.job);
+      setTerminalOpen(true);
+      setInstallOpen(false);
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    } finally {
+      setInstallStarting(false);
+    }
+  }
+
   // 卸载指定 PHP 版本：转后台任务，终端弹窗跟踪进度
   async function handleUninstallVersion(v) {
     const ok = await uiConfirm({
@@ -372,8 +420,8 @@ export default function Php() {
     if (!job || job.running || !jobKey) return;
     if (!startedRef.current || notifiedRef.current) return;
     notifiedRef.current = true;
-    // 版本卸载任务：刷新版本列表，并把已卸载的版本从当前选中中切走
-    if (jobKey.startsWith('php-uninstall-')) {
+    // 版本卸载 / 版本安装任务：刷新版本列表，并把已卸载的版本从当前选中中切走
+    if (jobKey.startsWith('php-uninstall-') || jobKey === 'php') {
       refreshVersionsAfterJob(job);
       return;
     }
@@ -494,11 +542,16 @@ export default function Php() {
 
       {activeTab === 'versions' && (
         <GlassCard>
-          <div className="mb-4 flex items-center justify-between">
+          <div className="mb-4 flex items-center justify-between gap-3">
             <h2 className="text-lg font-semibold">{t('php.installedVersions')}</h2>
-            <LiquidButton onClick={fetchData} variant="ghost">
-              <RefreshCw className="w-4 h-4" /> {t('common.refresh')}
-            </LiquidButton>
+            <div className="flex items-center gap-2">
+              <LiquidButton onClick={openInstallOtherVersion} disabled={installVersionsLoading || installStarting}>
+                <Download className="w-4 h-4" /> {t('apps.installOtherVersion')}
+              </LiquidButton>
+              <LiquidButton onClick={fetchData} variant="ghost">
+                <RefreshCw className="w-4 h-4" /> {t('common.refresh')}
+              </LiquidButton>
+            </div>
           </div>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {data.versions.map((v) => (
@@ -900,6 +953,49 @@ export default function Php() {
             <Check className="w-4 h-4" /> {t('common.close')}
           </LiquidButton>
         </div>
+      </GlassModal>
+
+      {/* 安装其他版本：版本选择弹窗 */}
+      <GlassModal
+        title={t('apps.installTitle', { name: 'PHP' })}
+        subtitle={t('apps.installSubtitle')}
+        open={installOpen}
+        onClose={() => setInstallOpen(false)}
+      >
+        <form onSubmit={handleInstallOtherVersion} className="space-y-4">
+          <div>
+            <label className="mb-1.5 block text-sm text-white/70">{t('apps.version')}</label>
+            <div className="relative">
+              <select
+                value={installVersion}
+                onChange={(e) => setInstallVersion(e.target.value)}
+                disabled={installVersionsLoading || installVersions.length <= 1}
+                className="w-full appearance-none rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 pr-10 text-sm outline-none focus:border-cyan-400 disabled:opacity-50"
+              >
+                {installVersions.map((v) => (
+                  <option key={v} value={v} className="bg-gray-900 text-white">
+                    {v.startsWith('官方:') ? t('apps.officialSource', { version: v.slice(3) }) : v}
+                  </option>
+                ))}
+              </select>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/40"><path d="m6 9 6 6 6-6" /></svg>
+            </div>
+            {installVersionsLoading && <p className="mt-2 text-xs text-white/50">{t('apps.fetchingVersions')}</p>}
+          </div>
+          <div className="flex items-start gap-3 rounded-xl border border-cyan-400/20 bg-cyan-500/10 p-4">
+            <Terminal className="mt-0.5 h-4 w-4 flex-none text-cyan-300" />
+            <div className="text-sm">
+              <p className="text-cyan-100">{t('apps.backgroundInstall')}</p>
+              <p className="mt-1 text-xs text-white/50">{t('common.compileHint')}</p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <LiquidButton type="button" variant="ghost" onClick={() => setInstallOpen(false)}>{t('common.cancel')}</LiquidButton>
+            <LiquidButton type="submit" disabled={installVersionsLoading || !installVersion || installStarting}>
+              {installStarting ? t('apps.starting') : (<><Download className="w-4 h-4" /> {t('apps.startInstall')}</>)}
+            </LiquidButton>
+          </div>
+        </form>
       </GlassModal>
     </div>
   );

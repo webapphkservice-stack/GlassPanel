@@ -403,16 +403,6 @@ export default function Apps() {
                   </LiquidButton>
                 )}
               </div>
-              {app.multiVersion && app.installed && !busy && (
-                <LiquidButton
-                  onClick={() => openInstall(app)}
-                  disabled={!!startingKey}
-                  variant="ghost"
-                  className="mt-2 w-full justify-center"
-                >
-                  <Download className="w-4 h-4" /> {t('apps.installOtherVersion')}
-                </LiquidButton>
-              )}
             </GlassCard>
           );
         })}
