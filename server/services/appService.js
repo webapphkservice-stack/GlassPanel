@@ -5,10 +5,20 @@ const official = require('./officialSources');
 const jobService = require('./jobService');
 const nginxService = require('./nginxService');
 const sslService = require('./sslService');
+const phpService = require('./phpService');
 
 // 系统仓库/remi 无正式二进制包的版本 → 走源码编译（release → 具体版本号）
 const SOURCE_BUILD = {
-  php: { '8.5': '8.5.11' },
+  // PHP 全部版本统一源码编译：remi 的并行包在 alinux4 上不可用
+  // （php84/85 依赖 OpenSSL 3.2，本机只有 3.0.12；php81-83 依赖 EPEL 的 scl-utils），
+  // 而源码编译装到 /usr/local/php/<版本> 天然支持多版本并存
+  php: {
+    '8.1': '8.1.34',
+    '8.2': '8.2.34',
+    '8.3': '8.3.35',
+    '8.4': '8.4.26',
+    '8.5': '8.5.11',
+  },
   redis: { '8.0': '8.0.6' },
   ffmpeg: { '9.0.2': '9.0.2' },
   fail2ban: { '1.1.0': '1.1.0' },
@@ -455,6 +465,15 @@ WORK="${workDir}"
 mkdir -p "\${WORK}"
 cd "\${WORK}"
 
+# 同一大版本只保留一个补丁版本（/usr/local/php 下多出来的旧补丁目录会让面板把
+# 8.4.26 与 8.4.27 当成两个版本列出，而服务的 unit 名又相同，必须清理）
+for d in /usr/local/php/${major}.*; do
+  [ -d "$d" ] || continue
+  [ "$d" = "${prefix}" ] && continue
+  echo "[面板] 移除同大版本旧编译目录 $d"
+  rm -rf "$d"
+done
+
 if [ ! -f "php-\${PHP_VERSION}.tar.gz" ]; then
   curl -fSL -o "php-\${PHP_VERSION}.tar.gz" "https://www.php.net/distributions/php-\${PHP_VERSION}.tar.gz"
 fi
@@ -510,12 +529,35 @@ fi
 # 兼容旧版本已复制的默认配置：补齐 include 与 error_log
 grep -q "^include" "\${phpFpmConf}" || echo "include = \${phpFpmD}/*.conf" >> "\${phpFpmConf}"
 grep -q "^error_log" "\${phpFpmConf}" || echo "error_log = \${PREFIX}/var/log/php-fpm.log" >> "\${phpFpmConf}"
+# 多版本并存必须各占独立端口：先收集所有已安装版本的 listen，再取 9000-9099 中最小空闲端口。
+# 重装/升级时沿用本版本已有的端口，避免改动正在提供服务的端口。
+PHP_USED=""
+for f in /usr/local/php/*/etc/php-fpm.d/www.conf /etc/opt/remi/php*/php-fpm.d/www.conf /etc/php-fpm.d/www.conf; do
+  [ -f "$f" ] || continue
+  p=$(sed -n "s/^listen = 127\\.0\\.0\\.1:\\([0-9]\\{1,\\}\\)$/\\1/p" "$f" | head -1)
+  if [ -n "$p" ]; then PHP_USED="$PHP_USED $p"; fi
+done
+PORT=""
+if [ -f "\${phpFpmD}/www.conf" ]; then
+  PORT=$(sed -n "s/^listen = 127\\.0\\.0\\.1:\\([0-9]\\{1,\\}\\)$/\\1/p" "\${phpFpmD}/www.conf" | head -1)
+fi
+if [ -z "$PORT" ]; then
+  for cand in $(seq 9000 9099); do
+    case " $PHP_USED " in *" $cand "*) continue ;; esac
+    if ! ss -H -lnt 2>/dev/null | awk '{print $4}' | grep -q ":$cand$"; then PORT=$cand; break; fi
+  done
+fi
+if [ -z "$PORT" ]; then
+  PORT=9000
+  echo "[提示] 9000-9099 无空闲端口，PHP ${version} 暂用 9000，请手动调整监听"
+fi
+echo "[面板] PHP ${version} 监听 127.0.0.1:\${PORT}"
 if [ ! -f "\${phpFpmD}/www.conf" ]; then
   cat > "\${phpFpmD}/www.conf" <<EOS
 [www]
 user = nobody
 group = nobody
-listen = 127.0.0.1:9001
+listen = 127.0.0.1:\${PORT}
 listen.allowed_clients = 127.0.0.1
 pm = dynamic
 pm.max_children = 20
@@ -525,7 +567,7 @@ pm.max_spare_servers = 5
 pm.max_requests = 500
 EOS
 fi
-sed -i "s#^listen = .*#listen = 127.0.0.1:9001#" "\${phpFpmD}/www.conf" 2>/dev/null || true
+sed -i "s#^listen = .*#listen = 127.0.0.1:\${PORT}#" "\${phpFpmD}/www.conf" 2>/dev/null || true
 
 # systemd 服务
 cat > /etc/systemd/system/${serviceUnit}.service <<'EOS'
@@ -544,7 +586,10 @@ systemctl daemon-reload
 systemctl enable ${serviceUnit} >/dev/null 2>&1 || true
 
 mkdir -p "${markDir}"
-echo "${version}" > "${PHP_COMPILE_MARKER}"
+# 标记文件记录「已安装的最高版本」，装低版本时不能被覆盖，否则升级检测会退回到低版本
+PREV_MARK="$(cat "${PHP_COMPILE_MARKER}" 2>/dev/null || true)"
+NEW_MARK="$(printf '%s\\n%s\\n' "$PREV_MARK" "${version}" | sed '/^$/d' | sort -V | tail -1)"
+echo "$NEW_MARK" > "${PHP_COMPILE_MARKER}"
 
 echo "=== BUILD OK: PHP \${PHP_VERSION} → \${PREFIX} ==="
 "\${PREFIX}/bin/php" -v
@@ -611,6 +656,34 @@ function mysqlRootInitLines() {
   ];
 }
 
+// PHP 并行版本默认都监听 9000，会互相抢占；安装时给每个版本分配独立监听端口。
+// 9001 已被源码编译的 PHP 8.5 占用，故并行包从 9002 起分配。
+// 重装/升级时沿用池里已有的自定义端口，避免改动正在提供服务的端口。
+function phpPoolPortLines(release) {
+  const key = String(release).replace('.', '');
+  return [
+    '',
+    `PHP_POOL="/etc/opt/remi/php${key}/php-fpm.d/www.conf"`,
+    'if [ -f "$PHP_POOL" ]; then',
+    '  CUR=$(sed -n "s/^listen = 127\\.0\\.0\\.1:\\([0-9]\\{1,\\}\\)$/\\1/p" "$PHP_POOL" | head -1)',
+    '  if [ -z "$CUR" ] || [ "$CUR" -lt 9002 ] || [ "$CUR" -gt 9099 ]; then',
+    '    PORT=""',
+    '    for p in $(seq 9002 9099); do',
+    '      if ! ss -H -lnt 2>/dev/null | awk \'{print $4}\' | grep -q ":$p$"; then PORT=$p; break; fi',
+    '    done',
+    '    if [ -n "$PORT" ]; then',
+    '      sed -i "s#^listen = .*#listen = 127.0.0.1:$PORT#" "$PHP_POOL"',
+    `      echo "[面板] PHP ${release} 独立监听：127.0.0.1:$PORT"`,
+    '    else',
+    '      echo "[提示] 9002-9099 无空闲端口，请手动修改 $PHP_POOL 的 listen"',
+    '    fi',
+    '  else',
+    `    echo "[面板] PHP ${release} 沿用已有监听：127.0.0.1:$CUR"`,
+    '  fi',
+    'fi',
+  ];
+}
+
 // 启用并启动服务的脚本片段（失败仅提示，不中断任务）
 function enableServiceLines(service, key) {
   if (!service) return [];
@@ -641,7 +714,7 @@ ${enableServiceLines(service, key).join('\n')}
 // 安装前先用 tsflags=test 做依赖预检：依赖不满足时按「系统源优先」策略回退到系统发行版源安装；
 // 系统源也没有该包时才中止。例：nginx 官方 el9 包要求 libssl.so.3(OPENSSL_3.2.0/3.5.0)，
 // 而 alinux4 全仓库只有 openssl 3.0.12，官方包必然装不上，此时回退系统源的 nginx。
-function buildOfficialSourceInstallScript({ precheckLine, installLine, fallbackLine, fallbackPkg, disable, service, key }) {
+function buildOfficialSourceInstallScript({ precheckLine, installLine, fallbackLine, fallbackPkg, disable, service, key, preStartLines = [] }) {
   const disableOpt = disable ? `--disablerepo=${disable} ` : '';
   return `#!/usr/bin/env bash
 set -e
@@ -665,6 +738,7 @@ else
 fi
 rm -f "$PRECHECK_LOG"
 
+${(preStartLines || []).join('\n')}
 ${enableServiceLines(service, key).join('\n')}
 `;
 }
@@ -873,16 +947,18 @@ function compiledCleanupLines(key) {
   const unit = compiledServiceName(key, marker);
   const bodies = {
     php: [
-      `echo "[面板] 停止并移除服务 ${unit}"`,
-      `systemctl stop ${unit} 2>/dev/null || true`,
-      `systemctl disable ${unit} 2>/dev/null || true`,
-      `rm -f /etc/systemd/system/${unit}.service`,
-      `rm -rf /etc/systemd/system/${unit}.service.d`,
+      'echo "[面板] 停止并移除所有源码编译的 PHP-FPM 服务"',
+      "for u in $(systemctl list-unit-files 'php-fpm-*.service' --no-legend 2>/dev/null | awk '{print $1}'); do",
+      '  systemctl stop "$u" 2>/dev/null || true',
+      '  systemctl disable "$u" 2>/dev/null || true',
+      '  rm -f "/etc/systemd/system/$u"',
+      '  rm -rf "/etc/systemd/system/$u.d"',
+      'done',
       'systemctl daemon-reload',
-      `echo "[面板] 删除编译目录 /usr/local/php/${marker}"`,
-      `rm -rf /usr/local/php/${marker}`,
-      `echo "[面板] 删除编译工作目录 /opt/phpbuild/php-${marker}"`,
-      `rm -rf /opt/phpbuild/php-${marker}`,
+      'echo "[面板] 删除编译目录 /usr/local/php"',
+      'rm -rf /usr/local/php',
+      'echo "[面板] 删除编译工作目录 /opt/phpbuild"',
+      'rm -rf /opt/phpbuild',
     ],
     redis: [
       `echo "[面板] 停止并移除服务 ${unit}"`,
@@ -994,6 +1070,12 @@ async function buildInstallScript(key, version, config = {}) {
   const pkg = detectPkgManager();
   const officialSelected = /^官方:(.+)$/.exec(String(version || ''));
 
+  // PHP 必须指定具体版本：走系统源的 php-fpm 是单版本包，
+  // 装第二个版本会顶掉已有版本，无法实现多版本并存
+  if (key === 'php' && !officialSelected) {
+    throw new Error('PHP 请选择具体版本（官方:8.1 ~ 官方:8.5），不支持安装单版本的 php-fpm 包');
+  }
+
   if (officialSelected && app.hasOfficial) {
     const release = officialSelected[1];
     if (pkg !== 'dnf' && pkg !== 'yum') throw new Error('官方源当前仅支持 RHEL/dnf 系系统');
@@ -1009,7 +1091,10 @@ async function buildInstallScript(key, version, config = {}) {
     }
     const configure = { nginx: official.configureNginx, mysql: official.configureMysql, php: official.configurePhp };
     const cfg = await configure[key](release);
-    const binName = app.officialPackage || app.package;
+    // PHP 走 remi 并行包（php84-php-fpm）而非固定的 php-fpm，
+    // 才能让多个版本各自安装到 /opt/remi/phpXY 并独立启动
+    const binName = key === 'php' ? official.phpParallelPackage(release) : (app.officialPackage || app.package);
+    const phpService = key === 'php' ? `php${String(release).replace('.', '')}-fpm` : app.service;
     const cmd = pkg === 'dnf' ? 'dnf' : 'yum';
     const srcOpts = key === 'php'
       ? (cfg.dnfArgs || []).join(' ')
@@ -1021,13 +1106,23 @@ async function buildInstallScript(key, version, config = {}) {
     const precheckLine = key === 'php'
       ? `${cmd} ${srcOpts} -y --setopt=tsflags=test install ${binName}`
       : `${cmd} install -y --setopt=tsflags=test ${srcOpts} ${binName}`;
-    // 预检失败时回退到系统发行版源（排除面板托管的官方源）
+    // 预检失败时回退到系统发行版源（排除面板托管的官方源）。
+    // PHP 必须回退到同名的并行包：回退到 php-fpm 会变成单版本安装，
+    // 直接顶掉已安装的其它 PHP 版本，与多版本共存的目标相悖。
     const repos = official.officialRepoIds(key);
-    const disable = repos.join(',');
-    const fallbackLine = `${cmd} install -y ${disable ? `--disablerepo=${disable} ` : ''}${app.package}`;
+    const disable = key === 'php' ? official.allOfficialRepoIds().join(',') : repos.join(',');
+    const fallbackPkg = key === 'php' ? binName : app.package;
+    const fallbackLine = `${cmd} install -y ${disable ? `--disablerepo=${disable} ` : ''}${fallbackPkg}`;
     return {
       script: buildOfficialSourceInstallScript({
-        precheckLine, installLine, fallbackLine, fallbackPkg: app.package, disable, service: app.service, key,
+        precheckLine,
+        installLine,
+        fallbackLine,
+        fallbackPkg,
+        disable,
+        service: phpService,
+        key,
+        preStartLines: key === 'php' ? phpPoolPortLines(release) : [],
       }),
       label: `安装 ${app.name} ${release}`,
     };
@@ -1436,7 +1531,12 @@ async function listAppVersions(key) {
   }
   // 保证始终包含跟随默认的选项
   const officialVersions = app.hasOfficial ? official.getOfficialVersions(app.key) : [];
-  const merged = [...versions, ...officialVersions.map((v) => `官方:${v}`)];
+  // 安装弹窗默认选中第一项：PHP 倒序让最新版本排在最前。
+  // PHP 只暴露官方并行包版本，系统源的 php-fpm 是单版本包，不能用于多版本安装
+  const orderedOfficial = key === 'php' ? [...officialVersions].reverse() : officialVersions;
+  const merged = key === 'php'
+    ? orderedOfficial.map((v) => `官方:${v}`)
+    : [...versions, ...orderedOfficial.map((v) => `官方:${v}`)];
   return { versionCmdBin: null, pkgVersionSyntax: pkg === 'apt' ? 'equals' : 'dash', versions: [...new Set(merged)] };
 }
 
@@ -1549,6 +1649,35 @@ async function listApps() {
       continue;
     }
 
+    // PHP：支持多版本并存（源码编译 + remi 并行包），
+    // 以实际安装的所有版本为准，而不是单一标记文件，
+    // 否则装了第二个版本后卡片仍只显示第一个版本，也无法再进入安装。
+    if (app.key === 'php') {
+      const versions = await phpService.listVersions();
+      const marker = readMarker(app.key);
+      const target = marker ? latestTargetVersion(app.key, marker) : '';
+      const updateAvailable = !!target && compareVersions(target, marker) > 0;
+      const installed = versions.length > 0;
+      const running = versions.some((v) => v.status === 'active');
+      apps.push({
+        key: app.key,
+        name: app.name,
+        desc: app.desc,
+        package: app.package,
+        page: app.page,
+        icon: app.icon,
+        hasService: true,
+        installed,
+        version: versions.map((v) => v.version).join(' / '),
+        status: running ? 'active' : 'inactive',
+        updateAvailable,
+        latestVersion: updateAvailable ? target : '',
+        jobRunning: jobService.isRunning(app.key),
+        multiVersion: true,
+      });
+      continue;
+    }
+
     // 源码编译安装的软件走独立 systemd 服务（php → php-fpm-8.5，redis → redis-8.0）
     const marker = readMarker(app.key);
     const service = (marker && compiledServiceName(app.key, marker)) || app.service;
@@ -1610,7 +1739,11 @@ async function startInstall(key, version = '', config = {}) {
     label,
     script,
     onDone: async (code) => {
-      if (code === 0 && markerVersion) writeMarker(key, markerVersion);
+      if (code === 0 && markerVersion) {
+        // PHP 多版本并存时标记只保留最高版本，避免装低版本后覆盖掉升级基线
+        const prev = readMarker(key);
+        if (!prev || compareVersions(markerVersion, prev) >= 0) writeMarker(key, markerVersion);
+      }
       // 3x-ui 安装成功后：按配置自动创建 nginx 反代站点并签发 SSL
       if (code === 0 && key === '3x-ui' && domain) {
         await setupXuiGateway(key, port, domain, wantSsl);
@@ -1790,6 +1923,16 @@ async function startUninstall(key) {
   const lines = ['#!/usr/bin/env bash'];
   // fail2ban 需先停服务并清理 iptables 封禁链：卸载后 f2b-* 链与 DROP 规则会残留
   if (key === 'fail2ban') lines.push(...fail2banUninstallLines());
+  // PHP 可能同时装了多个并行版本（php81-php-fpm … php85-php-fpm），
+  // 包名不固定，按模式一次性全部卸载
+  if (key === 'php' && (pkg === 'dnf' || pkg === 'yum')) {
+    lines.push('PHP_PKGS=$(rpm -qa "php*-php-fpm" 2>/dev/null || true)');
+    lines.push('if [ -n "$PHP_PKGS" ]; then');
+    lines.push('  echo "[面板] 卸载所有 PHP-FPM 版本包："');
+    lines.push('  echo "$PHP_PKGS" | sed "s/^/  /"');
+    lines.push(`  ${pkg} remove -y $PHP_PKGS || true`);
+    lines.push('fi');
+  }
   if (pkg === 'dnf' || pkg === 'yum') {
     // 先探测包是否由包管理器安装：源码编译 / pip 安装的应用没有对应 RPM，
     // 直接 dnf remove 会打印 "No match for argument" 等噪音，掩盖真正的清理过程

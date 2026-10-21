@@ -185,6 +185,7 @@
     "versionLabel": "Version: ",
     "updateStatus": "Update Status",
     "viewProgress": "View Progress",
+    "installOtherVersion": "Install Another Version",
     "oneClickUpdate": "One-Click Update",
     "updateConfirm": "Update Confirmation",
     "updateMsg": "Update {name} from {from} to {to}? Source compilation updates take several minutes and the service will briefly restart.",

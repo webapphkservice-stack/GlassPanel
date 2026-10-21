@@ -15,7 +15,7 @@ const iconMap = { Globe, Server, Database, Cpu, Activity, Film, RefreshCw, Shiel
 
 // 需源码编译安装的版本（无二进制包，安装耗时较长）
 const LONG_BUILD_VERSIONS = {
-  php: ['官方:8.5'],
+  php: ['官方:8.1', '官方:8.2', '官方:8.3', '官方:8.4', '官方:8.5'],
   redis: ['官方:8.0'],
   ffmpeg: ['官方:9.0.2'],
   fail2ban: ['官方:1.1.0'],
@@ -162,7 +162,17 @@ export default function Apps() {
       const d = await getAppVersions(app.key);
       const list = d.versions || [];
       setVersions(list.length ? list : ['latest']);
-      if (list.length) setVersion(list[0]);
+      if (list.length) {
+        // 多版本应用（PHP）优先选中尚未安装的版本，避免默认重复安装已有版本
+        const installedList = String(app.version || '').split('/').map((s) => s.trim()).filter(Boolean);
+        const notInstalled = app.multiVersion
+          ? list.find((v) => {
+            const rel = v.replace('官方:', '');
+            return !installedList.some((i) => i === rel || i.startsWith(`${rel}.`));
+          })
+          : '';
+        setVersion(notInstalled || list[0]);
+      }
       // 3x-ui：记录已缓存的版本
       if (app.key === '3x-ui' && d.cached) {
         setXuiCached(d.cached);
@@ -393,6 +403,16 @@ export default function Apps() {
                   </LiquidButton>
                 )}
               </div>
+              {app.multiVersion && app.installed && !busy && (
+                <LiquidButton
+                  onClick={() => openInstall(app)}
+                  disabled={!!startingKey}
+                  variant="ghost"
+                  className="mt-2 w-full justify-center"
+                >
+                  <Download className="w-4 h-4" /> {t('apps.installOtherVersion')}
+                </LiquidButton>
+              )}
             </GlassCard>
           );
         })}

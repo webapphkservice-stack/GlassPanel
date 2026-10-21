@@ -77,8 +77,15 @@ async function configureMysql(release) {
   return { repo: `mysql${release.replace('.', '')}-community` };
 }
 
-// 配置 PHP remi 源并启用指定版本模块流
-// 兼容 alinux/anolis：remi release 依赖 epel 与 releasever=9，需用 rpm --nodeps 安装并校正 baseurl，enable 时需声明 platform:el9
+// remi 的并行安装包名：8.4 → php84-php-fpm。
+// 这类包安装到 /opt/remi/php84、二进制 /usr/sbin/php84-fpm、服务 php84-fpm，
+// 因此多个 PHP 版本可以真正并存。
+function phpParallelPackage(release) {
+  return `php${String(release).replace('.', '')}-php-fpm`;
+}
+
+// 配置 PHP remi 源（并行安装包模式，不使用模块流）
+// 兼容 alinux/anolis：remi release 依赖 epel，需用 rpm --nodeps 安装并校正 baseurl
 async function configurePhp(release) {
   const el = detectElMajor() || 9;
 
@@ -94,30 +101,29 @@ async function configurePhp(release) {
   }
 
   // 2. 将 remi 仓库 baseurl 固定到对应 el 大版本
-  // 所有 remi 子 repo 保持 enabled=0，安装时由 dnfArgs 的 --enablerepo=remi,remi-modular 临时启用。
+  // 所有 remi 子 repo 保持 enabled=0，安装时由 dnfArgs 临时启用。
   // 若常驻 enabled=1，系统源安装（如 dnf install php-fpm）会被 remi 包污染
   for (const f of ['remi.repo', 'remi-modular.repo', 'remi-safe.repo']) {
     const p = `/etc/yum.repos.d/${f}`;
     if (!fs.existsSync(p)) continue;
     let c = fs.readFileSync(p, 'utf8');
-    c = c.replace(/\$releasever_major/g, `${el}.0`);
+    // Alinux 的 $releasever 是 2/3/4，不是 RHEL 大版本，
+    // 必须替换成换算后的 el 编号，否则 remi 的 mirrorlist 会指向 /enterprise/3/... 而 404。
+    // 同时纠正已被历史版本写成 9.0 / 8.0 的地址（remi 的仓库路径只接受 8 / 9）
+    c = c.replace(/\$releasever_major/g, String(el)).replace(/\$releasever/g, String(el));
+    c = c.replace(/(enterprise\/)\d+(?:\.\d+)?\//g, `$1${el}/`);
     fs.writeFileSync(p, c.replace(/^enabled=1(?=\s*$)/gm, 'enabled=0'), 'utf8');
   }
 
   await run('dnf', ['clean', 'all'], { timeout: 60000 });
 
-  // 3. 启用指定版本模块流（alinux 需声明 module_platform_id=platform:el9）
-  const mod = await run(
-    'dnf',
-    ['--enablerepo=remi,remi-modular', '--setopt=module_platform_id=platform:el9', 'module', 'enable', '-y', `php:remi-${release}`],
-    { timeout: 180000 },
-  );
-  if (mod.exitCode !== 0) {
-    throw new Error(`启用 PHP ${release} remi 模块失败: ${mod.stderr || mod.stdout}`);
-  }
+  // 3. 只启用 remi 基础源与 remi-safe，不启用 remi-modular：
+  // 模块流 php:remi-x 是全局唯一的，装第二个版本就会顶掉第一个版本，
+  // 只有 php84-php-fpm 这类并行包才能做到多版本共存。
   return {
-    repo: `php:remi-${release}`,
-    dnfArgs: ['--enablerepo=remi,remi-modular', '--setopt=module_platform_id=platform:el9'],
+    repo: 'remi',
+    // alinux/anolis 需显式声明 module_platform_id，否则 dnf 会按平台 al8 过滤
+    dnfArgs: ['--enablerepo=remi,remi-safe', `--setopt=module_platform_id=platform:el${el}`],
   };
 }
 
@@ -151,4 +157,4 @@ function getOfficialVersions(key) {
   return OFFICIAL_RELEASES[key] || [];
 }
 
-module.exports = { OFFICIAL_RELEASES, configureNginx, configureMysql, configurePhp, getOfficialVersions, officialRepoIds, allOfficialRepoIds };
+module.exports = { OFFICIAL_RELEASES, configureNginx, configureMysql, configurePhp, getOfficialVersions, officialRepoIds, allOfficialRepoIds, phpParallelPackage };

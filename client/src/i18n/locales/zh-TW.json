@@ -177,6 +177,7 @@
     "versionLabel": "版本：",
     "updateStatus": "更新狀態",
     "viewProgress": "檢視進度",
+    "installOtherVersion": "安裝其他版本",
     "oneClickUpdate": "一鍵更新",
     "updateConfirm": "更新確認",
     "updateMsg": "確定將 {name} 從 {from} 更新到 {to}？原始碼編譯更新需要數分鐘，期間服務會短暫重新啟動。",
