@@ -6,6 +6,7 @@ const jobService = require('./jobService');
 const nginxService = require('./nginxService');
 const sslService = require('./sslService');
 const phpService = require('./phpService');
+const firewallService = require('./firewallService');
 
 // 系统仓库/remi 无正式二进制包的版本 → 走源码编译（release → 具体版本号）
 const SOURCE_BUILD = {
@@ -326,6 +327,17 @@ HOST="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
 [ -n "\$HOST" ] || HOST="$(hostname -I 2>/dev/null | awk '{print \$1}')"
 [ -n "\$HOST" ] || HOST="127.0.0.1"
 
+# 端口被其它进程占用时自动顺延（例如宿主机已有容器占用 3000）；
+# 更新时端口由正在运行的 Gogs 自己占用，此时不做切换
+port_busy() { ss -lntH 2>/dev/null | awk '{print \$4}' | grep -qE "[:.]\${1}\$"; }
+if port_busy "\${PORT}" && ! systemctl is-active --quiet gogs; then
+  echo "[面板] 端口 \${PORT} 已被占用，自动选择空闲端口"
+  for cand in \$(seq 3001 3050); do
+    if ! port_busy "\$cand"; then PORT="\$cand"; break; fi
+  done
+  echo "[面板] 使用端口 \${PORT}"
+fi
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "\$WORK"' EXIT
 # 安装包缓存：Gogs 体积约 40MB，国际链路较慢时支持断点续传，重试无需从头下载
@@ -412,8 +424,10 @@ INSTALL_LOCK = false
 SECRET_KEY = \$SECRET_KEY
 EOS
 else
-  # 已存在配置时只同步端口，避免更新覆盖用户的其它设置
+  # 已存在配置时只同步端口与访问地址，避免更新覆盖用户的其它设置
   sed -i "s/^HTTP_PORT = .*/HTTP_PORT = \${PORT}/" "${GOGS_DIR}/custom/conf/app.ini"
+  sed -i "s|^ROOT_URL = .*|ROOT_URL = http://\$HOST:\${PORT}/|" "${GOGS_DIR}/custom/conf/app.ini"
+  sed -i "s|^EXTERNAL_URL = .*|EXTERNAL_URL = http://\$HOST:\${PORT}/|" "${GOGS_DIR}/custom/conf/app.ini"
 fi
 
 chown -R git:git "${GOGS_DIR}" "${GOGS_DATA_DIR}" /home/git/.ssh
@@ -441,12 +455,19 @@ EOS
 systemctl daemon-reload
 systemctl enable gogs >/dev/null 2>&1 || true
 systemctl restart gogs
-sleep 2
-STATUS="$(systemctl is-active gogs 2>/dev/null || true)"
+# Gogs 首次启动要初始化目录，给最多 10 秒的启动窗口，避免误判为失败
+STATUS=""
+for _ in \$(seq 1 10); do
+  STATUS="\$(systemctl is-active gogs 2>/dev/null || true)"
+  [ "\$STATUS" = "active" ] && break
+  sleep 1
+done
 echo "[面板] Gogs 服务状态：\${STATUS}"
 if [ "\$STATUS" != "active" ]; then
   echo "[面板] Gogs 启动失败，最近日志："
   journalctl -u gogs -n 40 --no-pager 2>/dev/null || true
+  # 关闭 Restart=always 的循环重试，避免持续占用 CPU
+  systemctl stop gogs 2>/dev/null || true
   exit 1
 fi
 
@@ -457,6 +478,19 @@ echo "\$HOST" > "${GOGS_HOST_FILE}"
 echo "=== Gogs 安装完成：http://\${HOST}:\${PORT}/ ==="
 echo "[面板] 首次访问将进入安装向导，请按页面提示创建管理员账号（数据库等选项已预填）"
 `;
+}
+
+// 安装成功后放行端口：宿主机 iptables 默认 DROP 时，未放行的端口公网无法访问。
+// 更新时端口通常已存在，先查规则避免重复添加
+async function ensureFirewallPort(port) {
+  if (!port) return;
+  try {
+    const { rules } = await firewallService.listRules();
+    if ((rules || []).some((r) => String(r.port) === String(port))) return;
+    await firewallService.addRule({ port: String(port), protocol: 'tcp' });
+  } catch (e) {
+    // 防火墙放行失败不影响服务本身
+  }
 }
 
 function gogsUninstallLines() {
@@ -1876,6 +1910,18 @@ const APPS = [
     icon: 'Shield',
   },
   {
+    key: 'docker',
+    name: 'Docker',
+    desc: '容器运行时',
+    package: null,
+    officialPackage: null,
+    hasOfficial: false,
+    service: 'docker',
+    versionCmd: null,
+    page: null,
+    icon: 'Box',
+  },
+  {
     key: 'gogs',
     name: 'Gogs',
     desc: '轻量级自托管 Git 服务',
@@ -2101,10 +2147,34 @@ async function listApps() {
       });
       continue;
     }
+    // Docker：仅展示系统已安装的 Docker，不提供面板内安装/卸载入口
+    if (app.key === 'docker') {
+      const ver = await run('docker', ['--version']);
+      if (ver.exitCode !== 0) continue;
+      const version = (ver.stdout || '').match(/(\d+\.\d+\.\d+)/)?.[1] || '';
+      apps.push({
+        key: app.key,
+        name: app.name,
+        desc: app.desc,
+        package: '',
+        page: null,
+        icon: app.icon,
+        hasService: true,
+        installed: true,
+        version,
+        status: await getServiceStatus(app.service),
+        updateAvailable: false,
+        latestVersion: '',
+        jobRunning: false,
+        canManage: false,
+      });
+      continue;
+    }
     // Gogs：GitHub Release 管理的独立 systemd 服务
     if (app.key === 'gogs') {
       const marker = readMarker(app.key);
-      const installed = !!marker || fs.existsSync(`${GOGS_DIR}/gogs`);
+      // 以版本标记为准：安装中途失败（如端口占用）不会留下「已安装但不可用」的假状态
+      const installed = !!marker;
       const status = installed ? await getServiceStatus(app.service) : 'inactive';
       let latestVersion = '';
       let updateAvailable = false;
@@ -2255,6 +2325,7 @@ async function startInstall(key, version = '', config = {}) {
   const app = APPS.find((a) => a.key === key);
   if (!app) throw new Error('未知应用');
   if (app.systemUpdate) throw new Error('系统更新无需安装，请直接点击更新');
+  if (key === 'docker') throw new Error('Docker 由系统维护，面板仅展示运行状态');
   if (jobService.isRunning(key)) throw new Error(`${app.name} 正在执行任务中，请等待当前任务完成`);
   // 3x-ui：可选自动反代 + SSL 签发，域名格式提前校验，避免安装完成才发现配置错误
   const domain = key === '3x-ui' ? String(config.domain || '').trim() : '';
@@ -2279,6 +2350,11 @@ async function startInstall(key, version = '', config = {}) {
       // 3x-ui 安装成功后：按配置自动创建 nginx 反代站点并签发 SSL
       if (code === 0 && key === '3x-ui' && domain) {
         await setupXuiGateway(key, port, domain, wantSsl);
+      }
+      // Gogs 安装/更新成功后：放行实际使用的 HTTP 与内置 SSH 端口
+      if (code === 0 && key === 'gogs') {
+        await ensureFirewallPort(readGogsPort());
+        await ensureFirewallPort('3022');
       }
     },
   });
@@ -2406,6 +2482,12 @@ exit "$UPDATE_RC"
       key,
       label: `更新 Gogs 至 ${target}`,
       script: buildGogsInstallScript(latest, readGogsPort(), downloadUrl),
+      onDone: async (code) => {
+        if (code === 0) {
+          await ensureFirewallPort(readGogsPort());
+          await ensureFirewallPort('3022');
+        }
+      },
     });
   }
   // 3x-ui：跟随 GitHub Release 更新，保留当前端口

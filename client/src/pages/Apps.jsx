@@ -43,6 +43,8 @@ export default function Apps() {
   // 是否正在跟踪一个后台任务（用于持续刷新列表，保住「查看进度」入口）
   const [watchingJob, setWatchingJob] = useState(false);
   const [xuiPort, setXuiPort] = useState('2255');
+  // Gogs 监听端口：云服务器需要在安全组单独放行，安装时允许自定义
+  const [gogsPort, setGogsPort] = useState('3000');
   const [xuiSource, setXuiSource] = useState('github');
   const [xuiDomain, setXuiDomain] = useState('');
   const [xuiSsl, setXuiSsl] = useState(true);
@@ -143,6 +145,7 @@ export default function Apps() {
     setXuiKnownDomains([]);
     setXuiCertDomains([]);
     setXuiCached([]);
+    if (app.key === 'gogs') setGogsPort('3000');
     // 3x-ui：收集面板已有域名（站点 + 证书）供域名选择联想
     if (app.key === '3x-ui') {
       Promise.allSettled([getNginxSites(), getCertificates()])
@@ -208,7 +211,9 @@ export default function Apps() {
     e.preventDefault();
     const config = installKey === '3x-ui'
       ? { port: xuiPort, source: xuiSource, domain: xuiDomain.trim(), ssl: xuiSsl }
-      : {};
+      : installKey === 'gogs'
+        ? { port: gogsPort }
+        : {};
     await launch(installApp(installKey, version, config), installKey);
   }
 
@@ -384,18 +389,25 @@ export default function Apps() {
                         </LiquidButton>
                       </a>
                     )}
-                    {app.updateAvailable && (
+                    {app.updateAvailable && app.canManage !== false && (
                       <div className="flex-1">
                         <LiquidButton onClick={() => handleUpdate(app)} disabled={!!startingKey} className="w-full justify-center">
                           <RefreshCw className="w-4 h-4" /> {t('common.update')}
                         </LiquidButton>
                       </div>
                     )}
-                    <div className="flex-1">
-                      <LiquidButton onClick={() => handleUninstall(app.key, app.name)} disabled={!!startingKey} variant="danger" className="w-full justify-center">
-                        <Trash className="w-4 h-4" /> {t('common.uninstall')}
-                      </LiquidButton>
-                    </div>
+                    {app.canManage !== false && (
+                      <div className="flex-1">
+                        <LiquidButton onClick={() => handleUninstall(app.key, app.name)} disabled={!!startingKey} variant="danger" className="w-full justify-center">
+                          <Trash className="w-4 h-4" /> {t('common.uninstall')}
+                        </LiquidButton>
+                      </div>
+                    )}
+                    {app.canManage === false && (
+                      <div className="flex flex-1 items-center justify-center text-xs text-white/40">
+                        {t('apps.managedBySystem')}
+                      </div>
+                    )}
                   </>
                 ) : (
                   <LiquidButton onClick={() => openInstall(app)} disabled={!!startingKey} className="w-full justify-center">
@@ -442,6 +454,19 @@ export default function Apps() {
               <p className="mt-2 text-xs text-white/50">{t('apps.onlyDefaultVersion')}</p>
             )}
           </div>
+          {installKey === 'gogs' && (
+            <div>
+              <label className="mb-1.5 block text-sm text-white/70">{t('apps.gogsPort')}</label>
+              <input
+                type="number"
+                value={gogsPort}
+                onChange={(e) => setGogsPort(e.target.value)}
+                className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm outline-none focus:border-cyan-400"
+                placeholder="3000"
+              />
+              <p className="mt-1 text-xs text-white/40">{t('apps.gogsPortHint')}</p>
+            </div>
+          )}
           {installKey === '3x-ui' && (
             <div>
               <label className="mb-1.5 block text-sm text-white/70">{t('apps.xuiPort')}</label>

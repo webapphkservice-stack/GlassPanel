@@ -45,6 +45,7 @@ const ALLOWED_COMMANDS = {
   bash: '/usr/bin/bash',
   uname: '/usr/bin/uname',
   tar: '/usr/bin/tar',
+  docker: '/usr/bin/docker',
   ffmpeg: '/usr/local/bin/ffmpeg',
   ffprobe: '/usr/local/bin/ffprobe',
   pip3: '/usr/bin/pip3',
