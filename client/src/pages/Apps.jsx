@@ -15,7 +15,7 @@ const iconMap = { Globe, Server, Database, Cpu, Activity, Film, RefreshCw, Shiel
 
 // 需源码编译安装的版本（无二进制包，安装耗时较长）
 const LONG_BUILD_VERSIONS = {
-  php: ['官方:8.1', '官方:8.2', '官方:8.3', '官方:8.4', '官方:8.5'],
+  php: ['官方:5.6', '官方:8.1', '官方:8.2', '官方:8.3', '官方:8.4', '官方:8.5'],
   redis: ['官方:8.0'],
   ffmpeg: ['官方:9.0.2'],
   fail2ban: ['官方:1.1.0'],

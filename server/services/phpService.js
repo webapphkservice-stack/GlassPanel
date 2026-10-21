@@ -470,6 +470,10 @@ async function installExtension(version, module) {
   const ext = EXT_CATALOG.find((e) => e.module === module);
   if (!ext) throw new Error('未知扩展');
   const ctx = await resolveContext(version);
+  // 扩展目录均按 7.x+ 构建参数选型，5.6 需要旧版扩展源码，一键安装必然失败
+  if (ctx.item.version.startsWith('5.')) {
+    throw new Error('PHP 5.6 暂不支持扩展一键安装，请手动下载旧版扩展源码编译安装');
+  }
   const key = `php-ext-${ctx.item.version}-${ext.module}`;
   const script = buildExtInstallScript(ctx, ext);
   const job = jobService.start({

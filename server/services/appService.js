@@ -13,6 +13,7 @@ const SOURCE_BUILD = {
   // （php84/85 依赖 OpenSSL 3.2，本机只有 3.0.12；php81-83 依赖 EPEL 的 scl-utils），
   // 而源码编译装到 /usr/local/php/<版本> 天然支持多版本并存
   php: {
+    '5.6': '5.6.40',
     '8.1': '8.1.34',
     '8.2': '8.2.34',
     '8.3': '8.3.35',
@@ -457,6 +458,28 @@ function buildPhpCompileScript(release, version) {
   const serviceUnit = `php-fpm-${major}`;
   const workDir = `/opt/phpbuild/php-${version}`;
   const markDir = path.dirname(PHP_COMPILE_MARKER);
+  // PHP 5.6 老版本编译差异：
+  // - openssl 扩展只支持 OpenSSL 1.x，与系统 OpenSSL 3 不兼容，只能不带 openssl 编译
+  //   （curl 扩展用系统 libcurl 8.x，https 请求不受影响）
+  // - intl 扩展与新版 ICU（≥63）不兼容，跳过
+  // - gcc 10+ 默认 -fno-common，PHP 5.x 源码会报 multiple definition，需 -fcommon
+  // - 5.6 的 mysql 扩展仍在（旧应用依赖），走内置 mysqlnd，无需 mysql-devel
+  const isLegacy = major === '5.6';
+  const configureFlags = isLegacy
+    ? [
+        '--enable-fpm --with-fpm-user=nobody --with-fpm-group=nobody',
+        '--enable-mbstring --enable-bcmath --enable-opcache',
+        '--with-mysql --with-mysqli --with-pdo-mysql --with-pdo-sqlite',
+        '--with-gd --with-jpeg-dir --with-png-dir --with-freetype-dir',
+        '--with-curl --with-zlib --with-bz2 --enable-sockets --enable-pcntl --enable-zip',
+      ].join(' \\\n    ')
+    : [
+        '--enable-fpm --with-fpm-user=nobody --with-fpm-group=nobody',
+        '--enable-mbstring --enable-bcmath --enable-opcache',
+        '--with-pdo-mysql --with-mysqli --with-pdo-sqlite',
+        '--with-curl --with-openssl --with-zlib --with-bz2',
+        '--enable-sockets --enable-pcntl --enable-intl',
+      ].join(' \\\n    ');
   return `#!/usr/bin/env bash
 set -e
 PHP_VERSION="${version}"
@@ -485,21 +508,19 @@ dnf module disable php -y >/dev/null 2>&1 || true
 # 构建依赖（幂等）
 dnf -y install dnf-plugins-core >/dev/null 2>&1
 dnf -y groupinstall "Development Tools" "Development Libraries" >/dev/null 2>&1 || true
-dnf -y install gcc gcc-c++ make autoconf pkgconfig libxml2-devel openssl-devel oniguruma-devel bzip2-devel libcurl-devel libicu-devel sqlite-devel zlib-devel readline-devel file libtool lksctp-tools-devel >/dev/null
+dnf -y install gcc gcc-c++ make autoconf pkgconfig libxml2-devel openssl-devel oniguruma-devel bzip2-devel libcurl-devel libicu-devel sqlite-devel zlib-devel readline-devel file libtool lksctp-tools-devel libpng-devel libjpeg-turbo-devel freetype-devel >/dev/null
 
 tar xzf "php-\${PHP_VERSION}.tar.gz"
 cd "php-\${PHP_VERSION}"
 
 if [ ! -f Makefile ]; then
+${isLegacy ? 'export CFLAGS="-O2 -fcommon"' : ''}
+
   ./configure \\
     --prefix="\${PREFIX}" \\
     --with-config-file-path="\${PREFIX}/etc" \\
     --with-config-file-scan-dir="\${PREFIX}/etc/conf.d" \\
-    --enable-fpm --with-fpm-user=nobody --with-fpm-group=nobody \\
-    --enable-mbstring --enable-bcmath --enable-opcache \\
-    --with-pdo-mysql --with-mysqli --with-pdo-sqlite \\
-    --with-curl --with-openssl --with-zlib --with-bz2 \\
-    --enable-sockets --enable-pcntl --enable-intl
+    ${configureFlags}
 fi
 
 if [ ! -f "\${PREFIX}/bin/php" ]; then

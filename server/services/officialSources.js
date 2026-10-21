@@ -13,7 +13,7 @@ const { run } = require('./commandRunner');
 const OFFICIAL_RELEASES = {
   nginx: ['stable', 'mainline'],
   mysql: ['8.0', '8.4'],
-  php: ['8.1', '8.2', '8.3', '8.4', '8.5'],
+  php: ['5.6', '8.1', '8.2', '8.3', '8.4', '8.5'],
   redis: ['8.0'],
   supervisor: ['4.3'],
   ffmpeg: ['9.0.2'],
