@@ -353,6 +353,42 @@ const EXT_CATALOG = [
   { module: 'sysvshm', name: 'SysV Shared Memory', kind: 'bundled', dir: 'sysvshm', desc: 'SysV 共享内存', args: ['--enable-sysvshm'], deps: [] },
 ];
 
+// PECL 扩展最新稳定版对旧 PHP 分支有兼容下限：为 5.x / 7.x 指定已知可编译的版本，
+// 未命中的分支走 pecl.php.net 最新稳定版
+const EXT_LEGACY_VERSIONS = {
+  redis: { '5.6': '4.3.0', '7.0': '5.3.7', '7.1': '5.3.7' }, // phpredis 6.x 需 PHP ≥ 7.2
+  apcu: { '5.6': '4.0.11', '7.0': '5.1.21', '7.1': '5.1.21' },
+  imagick: { '5.6': '3.7.0', '7.0': '3.7.0', '7.1': '3.7.0', '7.2': '3.7.0', '7.3': '3.7.0', '7.4': '3.7.0' },
+  memcached: { '5.6': '2.2.0' },
+  mongodb: { '5.6': '1.13.0', '7.0': '1.13.0', '7.1': '1.13.0', '7.2': '1.16.2', '7.3': '1.16.2' },
+  igbinary: { '5.6': '2.0.8' },
+  msgpack: { '5.6': '0.5.7' },
+  yaml: { '5.6': '1.3.1' },
+  ssh2: { '5.6': '1.3.1', '7.0': '1.3.1', '7.1': '1.3.1', '7.2': '1.3.1', '7.3': '1.3.1' },
+  xdebug: { '5.6': '2.5.5', '7.0': '2.7.2', '7.1': '2.9.8', '7.2': '3.1.6', '7.3': '3.1.6' },
+};
+
+// pecl.php.net 在部分网络（如国内云服务器）下经常瞬时不可达，为固定版本的扩展
+// 提供 GitHub tag 归档兜底（tag 命名已逐一实测：apcu 带 v 前缀、msgpack 带 msgpack-
+// 前缀、xdebug 2.x 为 XDEBUG_2_x_y 格式）。返回空串表示该包无兜底源。
+const EXT_GITHUB_FALLBACK = {
+  redis: (v) => `https://github.com/phpredis/phpredis/archive/refs/tags/${v}.tar.gz`,
+  apcu: (v) => `https://github.com/krakjoe/apcu/archive/refs/tags/v${v}.tar.gz`,
+  imagick: (v) => `https://github.com/Imagick/imagick/archive/refs/tags/${v}.tar.gz`,
+  memcached: (v) => `https://github.com/php-memcached-dev/php-memcached/archive/refs/tags/${v}.tar.gz`,
+  mongodb: (v) => `https://github.com/mongodb/mongo-php-driver/archive/refs/tags/${v}.tar.gz`,
+  igbinary: (v) => `https://github.com/igbinary/igbinary/archive/refs/tags/${v}.tar.gz`,
+  msgpack: (v) => `https://github.com/msgpack/msgpack-php/archive/refs/tags/msgpack-${v}.tar.gz`,
+  xdebug: (v) => (v.startsWith('2.') ? `https://github.com/xdebug/xdebug/archive/refs/tags/XDEBUG_${v.split('.').join('_')}.tar.gz` : ''),
+};
+
+// 各版本不可用的扩展（源码包里没有该扩展目录，编译必然失败）
+function extUnavailable(version, module) {
+  // ext/sodium 于 PHP 7.2 起随源码发布
+  if (module === 'sodium' && compareVersions(version, '7.2') < 0) return '需要 PHP 7.2+';
+  return '';
+}
+
 async function listLoadedModules(bin) {
   try {
     const { stdout } = await execFileAsync(bin, ['-m'], { timeout: 15000 });
@@ -366,22 +402,25 @@ async function getExtensions(version) {
   const ctx = await resolveContext(version);
   const loaded = await listLoadedModules(ctx.item.bin);
   const set = new Set(loaded.map((m) => m.toLowerCase()));
-  const catalog = EXT_CATALOG.map((ext) => {
-    let enabledFile = '';
-    if (ctx.confD) {
-      const f = path.join(ctx.confD, `${ext.module}.ini`);
-      if (fs.existsSync(f)) enabledFile = f;
-    }
-    // 扩展安装任务 key 与 installExtension 保持一致，供前端在编译期间显示并重开「查看进度」
-    const jobKey = `php-ext-${ctx.item.version}-${ext.module}`;
-    return {
-      ...ext,
-      installed: set.has(ext.module.toLowerCase()),
-      enabledFile,
-      jobKey,
-      jobRunning: jobService.isRunning(jobKey),
-    };
-  });
+  const catalog = EXT_CATALOG
+    .map((ext) => {
+      let enabledFile = '';
+      if (ctx.confD) {
+        const f = path.join(ctx.confD, `${ext.module}.ini`);
+        if (fs.existsSync(f)) enabledFile = f;
+      }
+      // 扩展安装任务 key 与 installExtension 保持一致，供前端在编译期间显示并重开「查看进度」
+      const jobKey = `php-ext-${ctx.item.version}-${ext.module}`;
+      return {
+        ...ext,
+        installed: set.has(ext.module.toLowerCase()),
+        enabledFile,
+        jobKey,
+        jobRunning: jobService.isRunning(jobKey),
+      };
+    })
+    // 源码包不含的扩展（如 sodium 需 7.2+）不展示，避免安装必然失败
+    .filter((ext) => !extUnavailable(ctx.item.version, ext.module));
   return {
     version: ctx.item.version,
     service: ctx.item.service,
@@ -397,7 +436,19 @@ function buildExtInstallScript(ctx, ext) {
   const phpVer = ctx.item.version;
   const work = `${EXT_BUILD_ROOT}/${ext.module}`;
   const deps = (ext.deps || []).join(' ');
-  const args = (ext.args || []).join(' ');
+  // 旧分支的 configure 参数差异：gd / zip 的语法分界在 7.4
+  const oldSyntax = compareVersions(phpVer, '7.4') < 0;
+  let args = (ext.args || []).join(' ');
+  if (ext.module === 'gd') {
+    args = oldSyntax
+      ? '--with-gd --with-jpeg-dir --with-png-dir --with-freetype-dir'
+      : '--enable-gd --with-jpeg --with-freetype';
+  } else if (ext.module === 'zip') {
+    args = oldSyntax ? '--enable-zip' : '--with-zip';
+  }
+  // PECL 扩展按 PHP 分支选版本（EXT_LEGACY_VERSIONS 未命中走最新稳定版）
+  const extVersion = (EXT_LEGACY_VERSIONS[ext.module] || {})[phpVer.replace(/\.\d+$/, '')] || '';
+  const peclName = ext.pkg + (extVersion ? `-${extVersion}` : '');
   // 编译依赖统一从系统源安装：显式排除面板托管的官方源，避免与官方包混装
   // （存量机器上 repo 文件可能仍是 enabled=1，只改写盘逻辑覆盖不到）
   const repoExclude = official.allOfficialRepoIds().join(',');
@@ -426,9 +477,25 @@ function buildExtInstallScript(ctx, ext) {
   lines.push('rm -rf "$WORK"; mkdir -p "$WORK"; cd "$WORK" || exit 1');
 
   if (ext.kind === 'pecl') {
+    const ghUrl = extVersion ? ((EXT_GITHUB_FALLBACK[ext.module] || (() => ''))(extVersion)) : '';
     lines.push(
-      `echo "[面板] 下载 ${ext.pkg} 源码（pecl.php.net 最新稳定版）"`,
-      `curl -fSL -o ext.tar.gz "https://pecl.php.net/get/${ext.pkg}" || { echo "[面板] 下载失败，请检查服务器网络"; exit 1; }`,
+      `echo "[面板] 下载 ${peclName}${extVersion ? '' : '（最新稳定版）'} 源码（pecl.php.net）"`,
+      'PECL_OK=0',
+      'for i in 1 2 3; do',
+      `  curl -fSL -m 180 -o ext.tar.gz "https://pecl.php.net/get/${peclName}" && { PECL_OK=1; break; }`,
+      '  echo "[面板] pecl.php.net 第 ${i} 次下载失败"',
+      '  sleep 3',
+      'done',
+      'if [ "$PECL_OK" != 1 ]; then',
+      `  GH_URL="${ghUrl}"`,
+      '  if [ -n "$GH_URL" ]; then',
+      '    echo "[面板] pecl.php.net 不可达，改用 GitHub 源"',
+      '    curl -fSL -m 180 -o ext.tar.gz "$GH_URL" || { echo "[面板] 下载失败，请检查服务器网络"; exit 1; }',
+      '  else',
+      '    echo "[面板] 下载失败，请检查服务器网络"',
+      '    exit 1',
+      '  fi',
+      'fi',
       'tar xzf ext.tar.gz || { echo "[面板] 解压失败"; exit 1; }',
       'SRCDIR="$(find "$WORK" -maxdepth 1 -mindepth 1 -type d | head -1)"',
       'if [ -z "$SRCDIR" ]; then echo "[面板] 未找到解压后的源码目录"; exit 1; fi',
@@ -470,10 +537,8 @@ async function installExtension(version, module) {
   const ext = EXT_CATALOG.find((e) => e.module === module);
   if (!ext) throw new Error('未知扩展');
   const ctx = await resolveContext(version);
-  // 扩展目录均按 7.x+ 构建参数选型，5.6 需要旧版扩展源码，一键安装必然失败
-  if (ctx.item.version.startsWith('5.')) {
-    throw new Error('PHP 5.6 暂不支持扩展一键安装，请手动下载旧版扩展源码编译安装');
-  }
+  const why = extUnavailable(ctx.item.version, ext.module);
+  if (why) throw new Error(`${ext.name} 扩展${why}，无法安装`);
   const key = `php-ext-${ctx.item.version}-${ext.module}`;
   const script = buildExtInstallScript(ctx, ext);
   const job = jobService.start({

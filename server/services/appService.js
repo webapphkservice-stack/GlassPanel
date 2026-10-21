@@ -14,6 +14,11 @@ const SOURCE_BUILD = {
   // 而源码编译装到 /usr/local/php/<版本> 天然支持多版本并存
   php: {
     '5.6': '5.6.40',
+    '7.0': '7.0.33',
+    '7.1': '7.1.33',
+    '7.2': '7.2.34',
+    '7.3': '7.3.33',
+    '7.4': '7.4.33',
     '8.1': '8.1.34',
     '8.2': '8.2.34',
     '8.3': '8.3.35',
@@ -458,14 +463,18 @@ function buildPhpCompileScript(release, version) {
   const serviceUnit = `php-fpm-${major}`;
   const workDir = `/opt/phpbuild/php-${version}`;
   const markDir = path.dirname(PHP_COMPILE_MARKER);
-  // PHP 5.6 老版本编译差异：
-  // - openssl 扩展只支持 OpenSSL 1.x，与系统 OpenSSL 3 不兼容，只能不带 openssl 编译
-  //   （curl 扩展用系统 libcurl 8.x，https 请求不受影响）
-  // - intl 扩展与新版 ICU（≥63）不兼容，跳过
-  // - gcc 10+ 默认 -fno-common，PHP 5.x 源码会报 multiple definition，需 -fcommon
-  // - 5.6 的 mysql 扩展仍在（旧应用依赖），走内置 mysqlnd，无需 mysql-devel
-  const isLegacy = major === '5.6';
-  const configureFlags = isLegacy
+  // PHP 旧版本编译差异（OpenSSL 3 / 新 ICU / gcc 12 环境下）：
+  // - 5.6：openssl 扩展只支持 OpenSSL 1.x → 不带 openssl（https 走 curl）；
+  //   mysql 扩展仍在（旧应用依赖，走 mysqlnd）；intl 与新 ICU 不兼容 → 跳过
+  // - 7.0~7.4：同 5.6 不带 openssl/intl（实测 7.4.33 的 openssl 扩展对
+  //   OpenSSL 3.0 编译报 const 错误，7.4 的 openssl 需求走 curl 扩展）；
+  //   GD 用旧语法（--with-gd，8.0 才移除），zip 用内置库
+  // - 8.x：完整配置（OpenSSL 3 / 新 ICU 均兼容）
+  // - gcc 10+ 默认 -fno-common，PHP < 8.0 源码会报 multiple definition，需 -fcommon
+  const isLegacy56 = major === '5.6';
+  const isLegacy7 = /^7\.[0-4]$/.test(major);
+  const needFcommon = isLegacy56 || isLegacy7 || major === '7.4';
+  const configureFlags = isLegacy56
     ? [
         '--enable-fpm --with-fpm-user=nobody --with-fpm-group=nobody',
         '--enable-mbstring --enable-bcmath --enable-opcache',
@@ -473,18 +482,29 @@ function buildPhpCompileScript(release, version) {
         '--with-gd --with-jpeg-dir --with-png-dir --with-freetype-dir',
         '--with-curl --with-zlib --with-bz2 --enable-sockets --enable-pcntl --enable-zip',
       ].join(' \\\n    ')
-    : [
-        '--enable-fpm --with-fpm-user=nobody --with-fpm-group=nobody',
-        '--enable-mbstring --enable-bcmath --enable-opcache',
-        '--with-pdo-mysql --with-mysqli --with-pdo-sqlite',
-        '--with-curl --with-openssl --with-zlib --with-bz2',
-        '--enable-sockets --enable-pcntl --enable-intl',
-      ].join(' \\\n    ');
+    : isLegacy7
+      ? [
+          '--enable-fpm --with-fpm-user=nobody --with-fpm-group=nobody',
+          '--enable-mbstring --enable-bcmath --enable-opcache',
+          '--with-mysqli --with-pdo-mysql --with-pdo-sqlite',
+          '--with-gd --with-jpeg-dir --with-png-dir --with-freetype-dir',
+          '--with-curl --with-zlib --with-bz2 --enable-sockets --enable-pcntl --enable-zip',
+        ].join(' \\\n    ')
+      : [
+          '--enable-fpm --with-fpm-user=nobody --with-fpm-group=nobody',
+          '--enable-mbstring --enable-bcmath --enable-opcache',
+          '--with-pdo-mysql --with-mysqli --with-pdo-sqlite',
+          '--with-curl --with-openssl --with-zlib --with-bz2',
+          '--enable-sockets --enable-pcntl --enable-intl',
+        ].join(' \\\n    ');
   return `#!/usr/bin/env bash
 set -e
 PHP_VERSION="${version}"
 PREFIX="${prefix}"
 WORK="${workDir}"
+# 编译失败时清掉构建目录：残留的 Makefile 会让下次重试跳过 configure，
+# 以旧参数（可能已随版本调整）继续编译，必然再次失败
+trap 'echo "[面板] 编译失败，清理构建目录以便重试"; rm -rf "$WORK"' ERR
 mkdir -p "\${WORK}"
 cd "\${WORK}"
 
@@ -514,7 +534,7 @@ tar xzf "php-\${PHP_VERSION}.tar.gz"
 cd "php-\${PHP_VERSION}"
 
 if [ ! -f Makefile ]; then
-${isLegacy ? 'export CFLAGS="-O2 -fcommon"' : ''}
+${needFcommon ? 'export CFLAGS="-O2 -fcommon"' : ''}
 
   ./configure \\
     --prefix="\${PREFIX}" \\
