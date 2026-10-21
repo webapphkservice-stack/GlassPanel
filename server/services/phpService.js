@@ -497,6 +497,100 @@ async function uninstallExtension(version, module) {
   return { removed, iniPath: ini, reloaded };
 }
 
+// ---------- 版本卸载 ----------
+
+// 源码编译版本标记文件（与 appService 的 INSTALL_MARKERS.php 同路径，
+// 独立定义避免 require appService 造成循环依赖）
+const COMPILE_MARKER = '/opt/glass-panel/data/php-compiled-version';
+
+// 卸载指定版本：有站点正在使用时拒绝（fastcgi_pass 指向该版本 fpm 监听），
+// 否则转后台任务停止服务、删除安装目录/工作目录/服务单元，结束后重算版本标记
+async function uninstallVersion(version) {
+  const ctx = await resolveContext(version);
+  const item = ctx.item;
+
+  // 站点占用检查：枚举失败不阻塞卸载
+  let sites = [];
+  try {
+    // 延迟 require：nginxService 依赖本模块，提前 require 会拿到未初始化的空导出
+    const nginxService = require('./nginxService');
+    const all = await nginxService.listSites();
+    sites = all.filter((s) => s.phpVersion === item.version).map((s) => s.name);
+  } catch (err) {
+    // 忽略枚举错误
+  }
+  if (sites.length) {
+    throw new Error(`以下站点正在使用 PHP ${item.version}，请先在站点设置中切换 PHP 版本：${sites.join('、')}`);
+  }
+
+  const key = `php-uninstall-${item.version}`;
+  const job = jobService.start({
+    key,
+    label: `卸载 PHP ${item.version}`,
+    script: buildUninstallScript(item),
+    onDone: async () => refreshCompileMarker(),
+  });
+  return { job, key };
+}
+
+// 卸载脚本：编译版删目录与 unit；软件包版按 rpm 名批量 remove
+function buildUninstallScript(item) {
+  if (item.source === 'compiled') {
+    const prefix = path.dirname(path.dirname(item.bin)); // /usr/local/php/<version>
+    const workDir = `/opt/phpbuild/php-${item.version}`;
+    return `#!/usr/bin/env bash
+set -e
+echo "=== 卸载 PHP ${item.version}（源码编译）==="
+systemctl stop ${item.service} 2>/dev/null || true
+systemctl disable ${item.service} 2>/dev/null || true
+rm -f /etc/systemd/system/${item.service}.service
+rm -rf /etc/systemd/system/${item.service}.service.d
+systemctl daemon-reload
+echo "[面板] 删除安装目录 ${prefix}"
+rm -rf "${prefix}"
+echo "[面板] 删除编译工作目录 ${workDir}"
+rm -rf "${workDir}"
+echo "=== PHP ${item.version} 已卸载 ==="
+`;
+  }
+  const rpmKey = item.version.replace('.', '');
+  return `#!/usr/bin/env bash
+set -e
+echo "=== 卸载 PHP ${item.version}（软件包）==="
+PKGS=$(rpm -qa "php${rpmKey}-php-*" 2>/dev/null || true)
+if [ -z "$PKGS" ]; then
+  PKGS=$(rpm -qa 2>/dev/null | grep -E "^php${rpmKey}-(fpm|common|cli)(-|$)" || true)
+fi
+if [ -n "$PKGS" ]; then
+  echo "[面板] 卸载软件包："
+  echo "$PKGS" | sed "s/^/  /"
+  dnf remove -y $PKGS || yum remove -y $PKGS
+else
+  echo "[提示] 未找到 php${rpmKey} 相关软件包，仅停止服务"
+  systemctl stop ${item.service} 2>/dev/null || true
+  systemctl disable ${item.service} 2>/dev/null || true
+fi
+echo "=== PHP ${item.version} 已卸载 ==="
+`;
+}
+
+// 卸载后重算编译版本标记：保留剩余最高版本；全部卸载则删除标记文件
+function refreshCompileMarker() {
+  try {
+    const remaining = listInstalled()
+      .filter((i) => i.source === 'compiled')
+      .map((i) => i.version)
+      .sort(compareVersions);
+    if (!remaining.length) {
+      if (fs.existsSync(COMPILE_MARKER)) fs.unlinkSync(COMPILE_MARKER);
+    } else {
+      fs.writeFileSync(COMPILE_MARKER, `${remaining[remaining.length - 1]}\n`, 'utf8');
+    }
+  } catch (err) {
+    // 标记刷新失败不影响卸载结果
+  }
+}
+
 // ---------- 日志 ----------
 
 // 错误日志路径：优先 php-fpm.conf 的 error_log，否则用默认路径
@@ -634,6 +728,7 @@ module.exports = {
   getExtensions,
   installExtension,
   uninstallExtension,
+  uninstallVersion,
   getLogs,
   clearLogs,
   setSlowlog,

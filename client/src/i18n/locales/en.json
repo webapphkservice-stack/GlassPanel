@@ -449,6 +449,8 @@
     "slowlogSavedNoReload": "Slow log config saved, but php-fpm reload failed",
     "uninstallExtTitle": "Uninstall Extension",
     "uninstallExtMsg": "Uninstall PHP extension {name}? This will delete the enable config {file} and restart php-fpm.",
+    "uninstallVersionTitle": "Uninstall PHP Version",
+    "uninstallVersionMsg": "Uninstall PHP {version}? This will stop service {service} and delete its installation directory and config. This cannot be undone. Sites using this version must switch to another PHP version first.",
     "extUninstalled": "Extension {name} uninstalled",
     "extUninstalledNoReload": "Extension {name} uninstalled, but php-fpm reload failed",
     "noChange": "No changes to save",

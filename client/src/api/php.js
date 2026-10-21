@@ -3,6 +3,8 @@ import request from './request';
 export const getPhpStatus = () => request.get('/php/status');
 export const controlPhp = (action, version = '') =>
   request.post(`/php/control/${action}`, { version });
+export const uninstallPhpVersion = (version) =>
+  request.post('/php/uninstall', { version });
 
 // 配置（上传限制 / 禁用函数 / 配置修改 共用）
 export const getPhpSettings = (version = '') =>

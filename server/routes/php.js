@@ -87,6 +87,19 @@ router.post('/extensions/uninstall', async (req, res, next) => {
   }
 });
 
+// 卸载指定 PHP 版本：站点占用时后端直接拒绝；转后台任务执行，前端轮询 /php/job/:key
+router.post('/uninstall', async (req, res, next) => {
+  try {
+    const { version } = req.body || {};
+    if (!version) return res.status(400).json({ error: '缺少 version 参数' });
+    const result = await php.uninstallVersion(version);
+    store.addLog(req.user.username, 'php_uninstall', version);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/logs', async (req, res, next) => {
   try {
     const { version, type, lines } = req.query;

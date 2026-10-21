@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  getPhpStatus, controlPhp,
+  getPhpStatus, controlPhp, uninstallPhpVersion,
   getPhpSettings, savePhpSettings,
   getPhpExtensions, installPhpExtension, uninstallPhpExtension, getPhpJob,
   getPhpLogs, clearPhpLogs, setPhpSlowlog,
@@ -256,6 +256,26 @@ export default function Php() {
     applySettings(patch, t('php.configSaved'));
   }
 
+  // 卸载指定 PHP 版本：转后台任务，终端弹窗跟踪进度
+  async function handleUninstallVersion(v) {
+    const ok = await uiConfirm({
+      title: t('php.uninstallVersionTitle'),
+      message: t('php.uninstallVersionMsg', { version: v.version, service: v.service }),
+      confirmText: t('common.uninstall'),
+    });
+    if (!ok) return;
+    try {
+      const res = await uninstallPhpVersion(v.version);
+      startedRef.current = true;
+      notifiedRef.current = false;
+      setJobKey(res.job?.key || `php-uninstall-${v.version}`);
+      setJob(res.job);
+      setTerminalOpen(true);
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    }
+  }
+
   async function handleInstallExt(ext) {
     try {
       const res = await installPhpExtension(version, ext.module);
@@ -352,10 +372,29 @@ export default function Php() {
     if (!job || job.running || !jobKey) return;
     if (!startedRef.current || notifiedRef.current) return;
     notifiedRef.current = true;
+    // 版本卸载任务：刷新版本列表，并把已卸载的版本从当前选中中切走
+    if (jobKey.startsWith('php-uninstall-')) {
+      refreshVersionsAfterJob(job);
+      return;
+    }
     loadExtensions(version);
     if (job.exitCode === 0) toast(t('apps.taskComplete', { label: job.label || '' }), 'success');
     else toast(t('apps.taskFailed', { label: job.label || '', code: job.exitCode }), 'error');
   }, [job, jobKey]);
+
+  async function refreshVersionsAfterJob(job) {
+    let next = [];
+    try {
+      const d = await getPhpStatus();
+      setData(d);
+      next = d.versions || [];
+    } catch (err) {
+      // 忽略刷新失败
+    }
+    setVersion((cur) => (next.some((x) => x.version === cur) ? cur : (next[0]?.version || '')));
+    if (job.exitCode === 0) toast(t('apps.taskComplete', { label: job.label || '' }), 'success');
+    else toast(t('apps.taskFailed', { label: job.label || '', code: job.exitCode }), 'error');
+  }
 
   // 扩展安装任务进行中：持续刷新扩展列表，保证卡片始终保留「查看进度」入口。
   // 列表只在切页签时拉取，任务启动后不刷新的话卡片会一直停留在「安装」按钮，
@@ -505,6 +544,13 @@ export default function Php() {
                     </button>
                   </div>
                 </div>
+                <button
+                  onClick={() => handleUninstallVersion(v)}
+                  disabled={loading}
+                  className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-rose-400/20 py-1.5 text-xs text-rose-300 hover:bg-rose-500/10 disabled:opacity-50"
+                >
+                  <Trash className="w-3.5 h-3.5" /> {t('common.uninstall')}
+                </button>
               </div>
             ))}
             {data.versions.length === 0 && (

@@ -439,6 +439,8 @@
     "slowlogSavedNoReload": "慢速日誌設定已儲存，但 php-fpm 重新載入失敗",
     "uninstallExtTitle": "解除安裝擴充",
     "uninstallExtMsg": "確定解除安裝 PHP 擴充 {name} 嗎？將刪除啟用設定 {file} 並重新啟動 php-fpm。",
+    "uninstallVersionTitle": "解除安裝 PHP 版本",
+    "uninstallVersionMsg": "確定解除安裝 PHP {version} 嗎？將停止服務 {service} 並刪除其安裝目錄與設定，此操作不可復原。使用該版本的網站需先切換 PHP 版本。",
     "extUninstalled": "擴充 {name} 已解除安裝",
     "extUninstalledNoReload": "擴充 {name} 已解除安裝，但 php-fpm 重新載入失敗",
     "noChange": "沒有需要儲存的修改",

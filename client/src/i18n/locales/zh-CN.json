@@ -439,6 +439,8 @@
     "slowlogSavedNoReload": "慢日志配置已保存，但 php-fpm 重载失败",
     "uninstallExtTitle": "卸载扩展",
     "uninstallExtMsg": "确定卸载 PHP 扩展 {name} 吗？将删除启用配置 {file} 并重启 php-fpm。",
+    "uninstallVersionTitle": "卸载 PHP 版本",
+    "uninstallVersionMsg": "确定卸载 PHP {version} 吗？将停止服务 {service} 并删除其安装目录与配置，此操作不可恢复。使用该版本的站点需先切换 PHP 版本。",
     "extUninstalled": "扩展 {name} 已卸载",
     "extUninstalledNoReload": "扩展 {name} 已卸载，但 php-fpm 重载失败",
     "noChange": "没有需要保存的修改",
