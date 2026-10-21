@@ -52,6 +52,15 @@ router.get('/sites', async (req, res, next) => {
   }
 });
 
+// 站点空间占用：按根目录统计，单独接口避免拖慢站点列表首屏
+router.get('/sites/sizes', async (req, res, next) => {
+  try {
+    res.json({ sizes: await nginx.getSiteSizes() });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post('/sites', async (req, res, next) => {
   const { opId, ...payload } = req.body || {};
   // 带合法 opId 时启用开通进度跟踪，前端可轮询对应只读接口实时展示步骤

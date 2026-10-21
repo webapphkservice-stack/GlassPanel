@@ -4,6 +4,8 @@ export const getNginxStatus = () => request.get('/nginx/status');
 export const controlNginx = (action) => request.post(`/nginx/control/${action}`);
 export const testNginxConfig = () => request.post('/nginx/test');
 export const getNginxSites = () => request.get('/nginx/sites');
+// 站点空间占用：遍历站点根目录统计，目录较大时耗时较长
+export const getSiteSizes = () => request.get('/nginx/sites/sizes', { timeout: 120000 });
 // 创建站点可能同时签发证书，耗时较长，单独放宽超时
 export const createNginxSite = (payload) => request.post('/nginx/sites', payload, { timeout: 240000 });
 export const getNginxConfig = (path) => request.get('/nginx/config', { params: { path } });

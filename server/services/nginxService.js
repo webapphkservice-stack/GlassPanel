@@ -733,6 +733,37 @@ async function setSitePhpVersion(siteName, version) {
   };
 }
 
+// 站点空间占用：按站点根目录统计磁盘使用量（含子目录），供站点列表展示。
+// 反向代理站点或根目录不存在的站点不计入；单个站点统计失败不影响其它站点
+async function getSiteSizes() {
+  const sites = await listSites();
+  const sizes = {};
+  // 多个站点共用根目录时只统计一次，避免重复遍历大目录
+  const cache = new Map();
+  for (const site of sites) {
+    const root = String(site.root || '').trim();
+    if (!root || !root.startsWith('/')) {
+      sizes[site.name] = null;
+      continue;
+    }
+    if (!cache.has(root)) {
+      let value = null;
+      try {
+        if (fs.existsSync(root)) {
+          const res = await run('du', ['-sb', '--', root], { timeout: 60000 });
+          const bytes = parseInt(String(res.stdout || '').trim().split(/\s+/)[0], 10);
+          if (res.exitCode === 0 && Number.isFinite(bytes)) value = bytes;
+        }
+      } catch (err) {
+        // 忽略：该站点空间大小显示为未知
+      }
+      cache.set(root, value);
+    }
+    sizes[site.name] = cache.get(root);
+  }
+  return sizes;
+}
+
 // 站点类型：静态 HTML 或 PHP（PHP 会额外生成 fastcgi 转发块）
 // 提供 certPath/keyPath 时生成 80 跳转 + 443 反代的完整 HTTPS 配置（直接复用面板已有证书）
 function buildSiteConfig({ serverName, listen, root, proxyPass, rewrite, type, fpmListen, certPath, keyPath, logName }) {
@@ -1370,6 +1401,7 @@ module.exports = {
   control,
   testConfig,
   listSites,
+  getSiteSizes,
   parseServerBlocks,
   createSite,
   PROVISION_STEPS,

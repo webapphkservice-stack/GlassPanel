@@ -6,6 +6,7 @@ import {
   controlNginx,
   testNginxConfig,
   getNginxSites,
+  getSiteSizes,
   createNginxSite,
   getNginxConfig,
   saveNginxConfig,
@@ -42,6 +43,21 @@ const REWRITE_OPTIONS = [
   { value: 'laravel', label: 'Laravel' },
   { value: 'thinkphp', label: 'ThinkPHP' },
 ];
+
+// 站点空间大小：按 1024 进制换算，保留一位小数，未知时显示 -
+function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined || !Number.isFinite(Number(bytes))) return '-';
+  const value = Number(bytes);
+  if (value < 1024) return `${value} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = value / 1024;
+  let idx = 0;
+  while (size >= 1024 && idx < units.length - 1) {
+    size /= 1024;
+    idx += 1;
+  }
+  return `${size >= 100 ? size.toFixed(0) : size.toFixed(1)} ${units[idx]}`;
+}
 
 const EMPTY_FORM = {
   name: '',
@@ -96,6 +112,8 @@ export default function Nginx() {
   // 正在停止/重启的站点名，用于禁用按钮并显示进行中文案
   const [actingSite, setActingSite] = useState('');
   const [sitesRefreshing, setSitesRefreshing] = useState(false);
+  // 站点空间占用：站点名 → 字节数（null 表示无法统计），单独请求避免拖慢列表
+  const [siteSizes, setSiteSizes] = useState({});
   const [filesSite, setFilesSite] = useState(null);
   const [trafficSite, setTrafficSite] = useState(null);
   const [backupSite, setBackupSite] = useState(null);
@@ -123,12 +141,23 @@ export default function Nginx() {
     try {
       const data = await getNginxSites();
       setSites(data.sites);
+      // 空间统计单独请求：目录较大时耗时较长，不阻塞列表展示
+      fetchSiteSizes();
       return true;
     } catch (err) {
       toast(t('nginx.refreshFailed', { error: err?.message || String(err) }), 'warning');
       return false;
     } finally {
       setSitesRefreshing(false);
+    }
+  }
+
+  async function fetchSiteSizes() {
+    try {
+      const data = await getSiteSizes();
+      setSiteSizes(data.sizes || {});
+    } catch (err) {
+      // 统计失败时空间列显示 -，不影响站点列表本身
     }
   }
 
@@ -534,6 +563,7 @@ export default function Nginx() {
                   <th className="pb-3 font-medium">{t('nginx.serverName')}</th>
                   <th className="pb-3 font-medium">{t('nginx.listen')}</th>
                   <th className="pb-3 font-medium">{t('nginx.rootProxy')}</th>
+                  <th className="pb-3 font-medium">{t('nginx.diskUsage')}</th>
                   <th className="pb-3 font-medium">{t('nginx.phpVersion')}</th>
                   <th className="pb-3 font-medium">{t('nginx.ssl')}</th>
                   <th className="pb-3 font-medium">{t('nginx.configFile')}</th>
@@ -558,6 +588,13 @@ export default function Nginx() {
                     </td>
                     <td className="py-3 text-white/70">{site.listen}</td>
                     <td className="py-3 text-white/70">{site.root || site.proxyPass || '-'}</td>
+                    <td className="py-3 whitespace-nowrap text-white/70">
+                      {siteSizes[site.name] === undefined ? (
+                        <span className="text-white/30">…</span>
+                      ) : (
+                        formatBytes(siteSizes[site.name])
+                      )}
+                    </td>
                     <td className="py-3">
                       {!site.proxyPass ? (
                         <span className="flex flex-wrap items-center gap-2">

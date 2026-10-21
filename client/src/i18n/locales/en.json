@@ -237,6 +237,7 @@
     "serverName": "Server Name",
     "listen": "Listen",
     "rootProxy": "Root / Proxy",
+    "diskUsage": "Disk Usage",
     "phpVersion": "PHP Version",
     "ssl": "SSL",
     "configFile": "Config File",

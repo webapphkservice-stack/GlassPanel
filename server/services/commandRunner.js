@@ -31,6 +31,7 @@ const ALLOWED_COMMANDS = {
   openssl: '/usr/bin/openssl',
   free: '/usr/bin/free',
   df: '/usr/bin/df',
+  du: '/usr/bin/du',
   ps: '/usr/bin/ps',
   ss: '/usr/sbin/ss',
   dnf: '/usr/bin/dnf',

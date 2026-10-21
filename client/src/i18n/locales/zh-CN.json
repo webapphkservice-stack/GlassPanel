@@ -227,6 +227,7 @@
     "serverName": "Server Name",
     "listen": "Listen",
     "rootProxy": "Root / 代理",
+    "diskUsage": "空间大小",
     "phpVersion": "PHP 版本",
     "ssl": "SSL",
     "configFile": "配置文件",
