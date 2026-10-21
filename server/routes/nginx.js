@@ -219,6 +219,18 @@ router.post('/sites/:name/open-basedir', async (req, res, next) => {
   }
 });
 
+// 切换站点使用的 PHP 版本（改写 fastcgi_pass 并重载 Nginx）
+router.post('/sites/:name/php-version', async (req, res, next) => {
+  try {
+    const result = await nginx.setSitePhpVersion(req.params.name, String(req.body?.version || ''));
+    store.addLog(req.user.username, 'nginx_site_php_version', `${req.params.name}:${result.phpVersion}`);
+    res.json({ success: true, output: result });
+  } catch (err) {
+    logger.error('Nginx switch site php version failed', { error: err.message });
+    next(err);
+  }
+});
+
 // —— 站点备份：网站目录 + 站点配置文件（恢复前会校验包内路径） ——
 
 router.get('/sites/:name/backups', async (req, res, next) => {

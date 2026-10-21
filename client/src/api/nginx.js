@@ -78,3 +78,6 @@ export const enableSiteLog = (name) =>
 // 存量 PHP 站点配置目录隔离（open_basedir 注入），新建 PHP 站点已自动写入
 export const enableSiteOpenBasedir = (name) =>
   request.post(`/nginx/sites/${encodeURIComponent(name)}/open-basedir`, {}, { timeout: 30000 });
+// 切换站点使用的 PHP 版本（改写 fastcgi_pass 并重载 Nginx）
+export const setSitePhpVersion = (name, version) =>
+  request.post(`/nginx/sites/${encodeURIComponent(name)}/php-version`, { version }, { timeout: 60000 });

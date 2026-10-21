@@ -44,6 +44,11 @@ const INSTALL_MARKERS = {
 };
 const PHP_COMPILE_MARKER = INSTALL_MARKERS.php;
 
+// 源码编译目标版本（如 php 8.5 → 8.5.12）：供更新检查与既定安全补丁基线对齐
+function getSourceBuildVersion(key, release) {
+  return (SOURCE_BUILD[key] || {})[release] || '';
+}
+
 function readMarker(key) {
   const p = INSTALL_MARKERS[key];
   if (!p || !fs.existsSync(p)) return '';
@@ -457,7 +462,8 @@ function compiledServiceName(key, version) {
 }
 
 // 生成 PHP 源码编译安装脚本（写盘后由 bash 执行）
-function buildPhpCompileScript(release, version) {
+function buildPhpCompileScript(release, version, options = {}) {
+  const { keepOldPatch = false, startService = true, writeMarker = true } = options;
   const prefix = `/usr/local/php/${version}`;
   const major = version.replace(/\.\d+$/, ''); // 8.5.10 → 8.5，系统服务名按大版本
   const serviceUnit = `php-fpm-${major}`;
@@ -497,6 +503,31 @@ function buildPhpCompileScript(release, version) {
           '--with-curl --with-openssl --with-zlib --with-bz2',
           '--enable-sockets --enable-pcntl --enable-intl',
         ].join(' \\\n    ');
+  // 升级时保留旧补丁目录：新版本编译失败或迁移失败可随时回滚
+  const oldPatchCleanup = keepOldPatch ? '' : `# 同一大版本只保留一个补丁版本（/usr/local/php 下多出来的旧补丁目录会让面板把
+# 8.4.26 与 8.4.27 当成两个版本列出，而服务的 unit 名又相同，必须清理）
+for d in /usr/local/php/${major}.*; do
+  [ -d "$d" ] || continue
+  [ "$d" = "${prefix}" ] && continue
+  echo "[面板] 移除同大版本旧编译目录 $d"
+  rm -rf "$d"
+done
+
+`;
+  // 升级脚本由调用方在配置迁移完成后再启动服务，避免新目录未迁移配置就对外提供服务
+  const startLines = startService ? `# 启动服务（失败仅提示，不影响安装结果，便于面板上手动排查）
+"\${PREFIX}/sbin/php-fpm" -t || echo "[提示] php-fpm 配置校验失败"
+systemctl restart ${serviceUnit} || echo "[提示] ${serviceUnit} 启动失败，请检查 \${PREFIX}/var/log/php-fpm.log"
+systemctl is-active ${serviceUnit} || true
+` : '';
+  // 版本标记由调用方在升级成功后写入，避免升级中途失败导致升级基线提前变化
+  const markerLines = writeMarker ? `mkdir -p "${markDir}"
+# 标记文件记录「已安装的最高版本」，装低版本时不能被覆盖，否则升级检测会退回到低版本
+PREV_MARK="$(cat "${PHP_COMPILE_MARKER}" 2>/dev/null || true)"
+NEW_MARK="$(printf '%s\\n%s\\n' "$PREV_MARK" "${version}" | sed '/^$/d' | sort -V | tail -1)"
+echo "$NEW_MARK" > "${PHP_COMPILE_MARKER}"
+
+` : '';
   return `#!/usr/bin/env bash
 set -e
 PHP_VERSION="${version}"
@@ -508,17 +539,12 @@ trap 'echo "[面板] 编译失败，清理构建目录以便重试"; rm -rf "$WO
 mkdir -p "\${WORK}"
 cd "\${WORK}"
 
-# 同一大版本只保留一个补丁版本（/usr/local/php 下多出来的旧补丁目录会让面板把
-# 8.4.26 与 8.4.27 当成两个版本列出，而服务的 unit 名又相同，必须清理）
-for d in /usr/local/php/${major}.*; do
-  [ -d "$d" ] || continue
-  [ "$d" = "${prefix}" ] && continue
-  echo "[面板] 移除同大版本旧编译目录 $d"
-  rm -rf "$d"
-done
-
-if [ ! -f "php-\${PHP_VERSION}.tar.gz" ]; then
-  curl -fSL -o "php-\${PHP_VERSION}.tar.gz" "https://www.php.net/distributions/php-\${PHP_VERSION}.tar.gz"
+${oldPatchCleanup}if [ ! -f "php-\${PHP_VERSION}.tar.gz" ]; then
+  if ! curl -fSL -o "php-\${PHP_VERSION}.tar.gz" "https://www.php.net/distributions/php-\${PHP_VERSION}.tar.gz"; then
+    rm -f "php-\${PHP_VERSION}.tar.gz"
+    echo "[面板] 下载 PHP \${PHP_VERSION} 源码失败：该版本可能尚未在 php.net 发布，请确认版本号后重试"
+    exit 1
+  fi
 fi
 
 # 编译与 remi 模块无关；已启用的 php:remi-8.5 缺少 platform:el9 会导致 dnf 失败，先复位
@@ -626,20 +652,148 @@ EOS
 systemctl daemon-reload
 systemctl enable ${serviceUnit} >/dev/null 2>&1 || true
 
-mkdir -p "${markDir}"
-# 标记文件记录「已安装的最高版本」，装低版本时不能被覆盖，否则升级检测会退回到低版本
-PREV_MARK="$(cat "${PHP_COMPILE_MARKER}" 2>/dev/null || true)"
-NEW_MARK="$(printf '%s\\n%s\\n' "$PREV_MARK" "${version}" | sed '/^$/d' | sort -V | tail -1)"
-echo "$NEW_MARK" > "${PHP_COMPILE_MARKER}"
-
-echo "=== BUILD OK: PHP \${PHP_VERSION} → \${PREFIX} ==="
+${markerLines}echo "=== BUILD OK: PHP \${PHP_VERSION} → \${PREFIX} ==="
 "\${PREFIX}/bin/php" -v
 
-# 启动服务（失败仅提示，不影响安装结果，便于面板上手动排查）
-"\${PREFIX}/sbin/php-fpm" -t || echo "[提示] php-fpm 配置校验失败"
-systemctl restart ${serviceUnit} || echo "[提示] ${serviceUnit} 启动失败，请检查 \${PREFIX}/var/log/php-fpm.log"
-systemctl is-active ${serviceUnit} || true
+${startLines}`;
+}
+
+// PHP 补丁升级：新版本先编译到独立目录，配置迁移并启动成功后才删除旧版本；
+// 编译或启动失败时保留旧目录、恢复原 service unit，避免升级过程中站点长时间不可用
+function buildPhpUpdateScript(from, to) {
+  const release = from.replace(/\.\d+$/, '');
+  const oldPrefix = `/usr/local/php/${from}`;
+  const newPrefix = `/usr/local/php/${to}`;
+  const serviceUnit = `php-fpm-${release}`;
+  const unitPath = `/etc/systemd/system/${serviceUnit}.service`;
+  const backupUnit = `/tmp/${serviceUnit}.service.panel-backup`;
+  const compile = buildPhpCompileScript(release, to, {
+    keepOldPatch: true,
+    startService: false,
+    writeMarker: false,
+  }).replace(/^#!\/usr\/bin\/env bash\n/, '').replace(/^trap .*ERR\n/m, '');
+
+  return `#!/usr/bin/env bash
+set -e
+FROM="${from}"
+TO="${to}"
+OLD_PREFIX="${oldPrefix}"
+NEW_PREFIX="${newPrefix}"
+SERVICE="${serviceUnit}"
+UNIT_PATH="${unitPath}"
+BACKUP_UNIT="${backupUnit}"
+SERVICE_WAS_ACTIVE=0
+SERVICE_STOPPED=0
+if systemctl is-active --quiet "$SERVICE"; then SERVICE_WAS_ACTIVE=1; fi
+if [ -f "$UNIT_PATH" ]; then cp -f "$UNIT_PATH" "$BACKUP_UNIT"; fi
+
+echo "=== 更新 PHP \${FROM} → \${TO} ==="
+echo "[面板] 新版本将安装到 \${NEW_PREFIX}，旧版本在更新完成前保持可用"
+
+rollback() {
+  echo "[面板] 更新失败，正在回滚到 PHP ${from}"
+  # 编译阶段失败时 service unit 尚未改写，运行中的旧版本无需重启
+  if [ -f "$BACKUP_UNIT" ] && cmp -s "$BACKUP_UNIT" "$UNIT_PATH"; then
+    echo "[面板] service 配置未变化，PHP ${from} 保持运行"
+    return 0
+  fi
+  if [ "$SERVICE_STOPPED" = 1 ]; then
+    systemctl stop "$SERVICE" 2>/dev/null || true
+  fi
+  if [ -f "$BACKUP_UNIT" ]; then
+    cp -f "$BACKUP_UNIT" "$UNIT_PATH"
+    systemctl daemon-reload
+  fi
+  if [ "$SERVICE_WAS_ACTIVE" = 1 ]; then
+    systemctl start "$SERVICE" 2>/dev/null || true
+  fi
+  echo "[面板] 当前服务状态：$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+  echo "[面板] 旧版本 \${OLD_PREFIX} 已保留，站点配置无需修改"
+}
+
+trap 'echo "[面板] 升级中断，清理构建目录"; if [ -n "$WORK" ]; then rm -rf "$WORK"; fi; rollback' ERR
+
+${compile}
+
+if [ ! -d "$OLD_PREFIX" ]; then
+  echo "[面板] 旧版本目录不存在：$OLD_PREFIX"
+  rollback
+  exit 1
+fi
+
+echo "[面板] 迁移 php.ini、conf.d 与 php-fpm 配置（沿用原监听端口）"
+if [ -f "$OLD_PREFIX/etc/php.ini" ]; then
+  # 用户可能把 extension_dir 等写成绝对路径，一并指向新目录
+  sed "s#${oldPrefix}#${newPrefix}#g" "$OLD_PREFIX/etc/php.ini" > "$NEW_PREFIX/etc/php.ini"
+fi
+mkdir -p "$NEW_PREFIX/etc/conf.d" "$NEW_PREFIX/etc/php-fpm.d"
+if [ -d "$OLD_PREFIX/etc/conf.d" ]; then cp -rf "$OLD_PREFIX/etc/conf.d/." "$NEW_PREFIX/etc/conf.d/"; fi
+if [ -d "$OLD_PREFIX/etc/php-fpm.d" ]; then cp -rf "$OLD_PREFIX/etc/php-fpm.d/." "$NEW_PREFIX/etc/php-fpm.d/"; fi
+if [ -f "$OLD_PREFIX/etc/php-fpm.conf" ]; then
+  sed "s#${oldPrefix}#${newPrefix}#g" "$OLD_PREFIX/etc/php-fpm.conf" > "$NEW_PREFIX/etc/php-fpm.conf"
+fi
+# 同一小版本内扩展 ABI 兼容，迁移已编译的 .so，避免升级后扩展丢失
+if [ -d "$OLD_PREFIX/lib/php/extensions" ]; then
+  mkdir -p "$NEW_PREFIX/lib/php/extensions"
+  cp -a "$OLD_PREFIX/lib/php/extensions/." "$NEW_PREFIX/lib/php/extensions/"
+fi
+
+echo "[面板] 校验新版本 php-fpm 配置"
+if ! "$NEW_PREFIX/sbin/php-fpm" -t; then
+  echo "[面板] 新版本配置校验失败"
+  rollback
+  exit 1
+fi
+
+echo "[面板] 停止旧服务并启动新版本"
+SERVICE_STOPPED=1
+systemctl stop "$SERVICE" 2>/dev/null || true
+if ! systemctl start "$SERVICE"; then
+  rollback
+  exit 1
+fi
+sleep 1
+if systemctl is-active --quiet "$SERVICE"; then
+  echo "[面板] PHP \${TO} 已启动，服务运行正常"
+  # 新版本沿用旧 www.conf 的监听端口，站点 fastcgi_pass 无需修改
+  echo "[面板] 清理旧版本目录 \${OLD_PREFIX}"
+  rm -rf "$OLD_PREFIX"
+  rm -rf "/opt/phpbuild/php-${from}"
+  mkdir -p "${path.dirname(PHP_COMPILE_MARKER)}"
+  PREV_MARK="$(cat "${PHP_COMPILE_MARKER}" 2>/dev/null || true)"
+  NEW_MARK="$(printf '%s\\n%s\\n' "$PREV_MARK" "${to}" | sed '/^$/d' | sort -V | tail -1)"
+  echo "$NEW_MARK" > "${PHP_COMPILE_MARKER}"
+  rm -f "$BACKUP_UNIT"
+  echo "=== 更新完成：PHP \${FROM} → \${TO} ==="
+  "$NEW_PREFIX/bin/php" -v
+else
+  echo "[面板] 新版本启动失败，请查看日志：$NEW_PREFIX/var/log/php-fpm.log"
+  rollback
+  exit 1
+fi
 `;
+}
+
+// 启动 PHP 版本更新任务：由 PHP 管理页按版本发起，站点保持原有 fastcgi_pass 不变
+async function startPhpUpdate(from, to) {
+  const fromVersion = String(from || '').trim();
+  const toVersion = String(to || '').trim();
+  if (!fromVersion || !toVersion) throw new Error('缺少 PHP 版本参数');
+  if (fromVersion.replace(/\.\d+$/, '') !== toVersion.replace(/\.\d+$/, '')) {
+    throw new Error('仅支持同一大版本内的补丁更新');
+  }
+  const key = `php-update-${fromVersion}`;
+  if (jobService.isRunning(key)) throw new Error(`PHP ${fromVersion} 正在更新中，请等待当前任务完成`);
+  // 应用中心的 PHP 更新任务同样会改写 /usr/local/php，必须避免并发编译
+  if (jobService.isRunning('php')) throw new Error('PHP 更新任务正在进行中，请等待当前任务完成');
+  return jobService.start({
+    key,
+    label: `更新 PHP ${fromVersion} → ${toVersion}`,
+    script: buildPhpUpdateScript(fromVersion, toVersion),
+    onDone: async (code) => {
+      if (code === 0) phpService.refreshCompileMarker();
+    },
+  });
 }
 
 // ---- 任务脚本构建 ----
@@ -1927,9 +2081,23 @@ exit "$UPDATE_RC"
   if (compareVersions(target, installed) <= 0) throw new Error(`${app.name} 已是最新版本（${installed}）`);
 
   const release = releaseOf(key, installed);
+  // PHP 更新走「新版本独立编译 + 配置迁移 + 成功后删除旧版本」的安全路径，
+  // 避免编译失败时旧版本已被清理导致站点不可用
+  if (key === 'php') {
+    if (jobService.listRunning().some((j) => j.key.startsWith('php-update-'))) {
+      throw new Error('PHP 版本更新任务正在进行中，请等待当前任务完成');
+    }
+    return jobService.start({
+      key,
+      label: `更新 ${app.name} 至 ${target}`,
+      script: buildPhpUpdateScript(installed, target),
+      onDone: async (code) => {
+        if (code === 0) phpService.refreshCompileMarker();
+      },
+    });
+  }
   let script;
-  if (key === 'php') script = buildPhpCompileScript(release, target);
-  else if (key === 'redis') script = buildRedisCompileScript(target);
+  if (key === 'redis') script = buildRedisCompileScript(target);
   else if (key === 'ffmpeg') script = buildFfmpegCompileScript(target);
   else script = buildSupervisorInstallScript((PIP_INSTALL.supervisor || {})[release] || `supervisor==${target}`);
   script += buildPostUpdateScript(key, installed, target);
@@ -2016,6 +2184,8 @@ module.exports = {
   listAppVersions,
   startInstall,
   startUpdate,
+  startPhpUpdate,
+  getSourceBuildVersion,
   startUninstall,
   getJob,
   getRunningJobs,

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   getPhpStatus, controlPhp, uninstallPhpVersion,
+  getPhpUpdates, updatePhpVersion,
   getPhpSettings, savePhpSettings,
   getPhpExtensions, installPhpExtension, uninstallPhpExtension, getPhpJob,
   getPhpLogs, clearPhpLogs, setPhpSlowlog,
@@ -113,6 +114,9 @@ export default function Php() {
   const [installVersion, setInstallVersion] = useState('');
   const [installVersionsLoading, setInstallVersionsLoading] = useState(false);
   const [installStarting, setInstallStarting] = useState(false);
+  // 补丁更新：php.net 最新版本检查结果
+  const [updates, setUpdates] = useState({ versions: [] });
+  const [updatesLoading, setUpdatesLoading] = useState(false);
   const logRef = useRef(null);
   const startedRef = useRef(false);
   const notifiedRef = useRef(false);
@@ -144,6 +148,22 @@ export default function Php() {
     if (activeTab === 'ext') loadExtensions(version);
     if (activeTab === 'logs') loadLogs(version, logType, logLines);
   }, [version, activeTab]);
+
+  // 版本管理页签展示补丁更新提示，进入页面时自动检查一次（服务端缓存 10 分钟）
+  useEffect(() => {
+    if (activeTab === 'versions') fetchUpdates();
+  }, [activeTab]);
+
+  async function fetchUpdates(force = false) {
+    setUpdatesLoading(true);
+    try {
+      setUpdates(await getPhpUpdates(force));
+    } catch (err) {
+      // 检查失败不影响版本管理，卡片不显示更新入口
+    } finally {
+      setUpdatesLoading(false);
+    }
+  }
 
   async function handleControl(action, v = '') {
     setLoading(true);
@@ -324,6 +344,28 @@ export default function Php() {
     }
   }
 
+  // 更新到同分支最新补丁：新版本编译、配置迁移成功后才替换旧版本
+  async function handleUpdateVersion(v) {
+    const info = (updates.versions || []).find((u) => u.version === v.version);
+    if (!info?.hasUpdate) return;
+    const ok = await uiConfirm({
+      title: t('php.updateTitle'),
+      message: t('php.updateMsg', { from: info.version, to: info.latest }),
+      confirmText: t('php.updateConfirm'),
+    });
+    if (!ok) return;
+    try {
+      const res = await updatePhpVersion(v.version);
+      startedRef.current = true;
+      notifiedRef.current = false;
+      setJobKey(res.key || res.job?.key || `php-update-${v.version}`);
+      setJob(res.job);
+      setTerminalOpen(true);
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    }
+  }
+
   async function handleInstallExt(ext) {
     try {
       const res = await installPhpExtension(version, ext.module);
@@ -420,9 +462,9 @@ export default function Php() {
     if (!job || job.running || !jobKey) return;
     if (!startedRef.current || notifiedRef.current) return;
     notifiedRef.current = true;
-    // 版本卸载 / 版本安装任务：刷新版本列表，并把已卸载的版本从当前选中中切走
-    if (jobKey.startsWith('php-uninstall-') || jobKey === 'php') {
-      refreshVersionsAfterJob(job);
+    // 版本卸载 / 版本安装 / 版本更新任务：刷新版本列表，重新检查更新状态
+    if (jobKey.startsWith('php-uninstall-') || jobKey.startsWith('php-update-') || jobKey === 'php') {
+      refreshVersionsAfterJob(job).then(() => fetchUpdates(true));
       return;
     }
     loadExtensions(version);
@@ -439,7 +481,13 @@ export default function Php() {
     } catch (err) {
       // 忽略刷新失败
     }
-    setVersion((cur) => (next.some((x) => x.version === cur) ? cur : (next[0]?.version || '')));
+    // 更新后版本号会变化（如 8.4.26 → 8.4.27），优先保持当前大版本
+    setVersion((cur) => {
+      if (next.some((x) => x.version === cur)) return cur;
+      const major = String(cur || '').replace(/\.\d+$/, '');
+      const same = next.find((x) => x.version.replace(/\.\d+$/, '') === major);
+      return same?.version || next[0]?.version || '';
+    });
     if (job.exitCode === 0) toast(t('apps.taskComplete', { label: job.label || '' }), 'success');
     else toast(t('apps.taskFailed', { label: job.label || '', code: job.exitCode }), 'error');
   }
@@ -544,7 +592,10 @@ export default function Php() {
         <GlassCard>
           <div className="mb-4 flex items-center justify-between gap-3">
             <h2 className="text-lg font-semibold">{t('php.installedVersions')}</h2>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <LiquidButton onClick={() => fetchUpdates(true)} disabled={updatesLoading} variant="ghost">
+                <RefreshCw className={`w-4 h-4 ${updatesLoading ? 'animate-spin' : ''}`} /> {updatesLoading ? t('php.checkingUpdates') : t('php.checkUpdates')}
+              </LiquidButton>
               <LiquidButton onClick={openInstallOtherVersion} disabled={installVersionsLoading || installStarting}>
                 <Download className="w-4 h-4" /> {t('apps.installOtherVersion')}
               </LiquidButton>
@@ -554,7 +605,9 @@ export default function Php() {
             </div>
           </div>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {data.versions.map((v) => (
+            {data.versions.map((v) => {
+              const up = (updates.versions || []).find((u) => u.version === v.version);
+              return (
               <div key={`${v.source}-${v.version}`} className="rounded-xl border border-white/10 bg-white/5 p-4">
                 <div className="flex items-start justify-between">
                   <div className="flex items-center gap-3">
@@ -568,6 +621,25 @@ export default function Php() {
                   </div>
                   <StatusBadge status={v.status} />
                 </div>
+                {up && (
+                  <div className={`mt-3 flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs ${
+                    up.hasUpdate
+                      ? 'border-amber-400/30 bg-amber-500/10 text-amber-200'
+                      : 'border-white/10 bg-white/5 text-white/40'
+                  }`}>
+                    <span>{up.hasUpdate ? t('php.updateAvailable', { version: up.latest }) : t('php.upToDate')}</span>
+                    {up.hasUpdate && (
+                      <button
+                        onClick={() => (up.updating ? openJob(up.jobKey) : handleUpdateVersion(v))}
+                        disabled={loading}
+                        className="flex flex-none items-center gap-1 rounded-md border border-amber-400/40 bg-amber-500/15 px-2 py-1 text-xs text-amber-100 transition-colors hover:bg-amber-500/25 disabled:opacity-50"
+                      >
+                        {up.updating ? <Terminal className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
+                        {up.updating ? t('apps.viewProgress') : t('php.updateTo', { version: up.latest })}
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="mt-3 flex gap-2">
                   <div className="flex-1">
                     <button
@@ -605,7 +677,8 @@ export default function Php() {
                   <Trash className="w-3.5 h-3.5" /> {t('common.uninstall')}
                 </button>
               </div>
-            ))}
+              );
+            })}
             {data.versions.length === 0 && (
               <div className="col-span-full">
                 <EmptyState message={t('php.noPhpVersion')} />

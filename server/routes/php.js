@@ -87,6 +87,29 @@ router.post('/extensions/uninstall', async (req, res, next) => {
   }
 });
 
+// 检查各源码编译版本是否有同分支补丁更新（php.net 官方发布列表，缓存 10 分钟）
+router.get('/updates', async (req, res, next) => {
+  try {
+    const data = await php.listUpdates(req.query.force === 'true');
+    res.json(data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 更新指定 PHP 版本到同分支最新补丁：编译、迁移配置、启动成功后才删除旧版本
+router.post('/update', async (req, res, next) => {
+  try {
+    const { version } = req.body || {};
+    if (!version) return res.status(400).json({ error: '缺少 version 参数' });
+    const result = await php.updateVersion(version);
+    store.addLog(req.user.username, 'php_update', `${result.from}->${result.to}`);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // 卸载指定 PHP 版本：站点占用时后端直接拒绝；转后台任务执行，前端轮询 /php/job/:key
 router.post('/uninstall', async (req, res, next) => {
   try {

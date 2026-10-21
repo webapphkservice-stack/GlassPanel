@@ -6,6 +6,12 @@ export const controlPhp = (action, version = '') =>
 export const uninstallPhpVersion = (version) =>
   request.post('/php/uninstall', { version });
 
+// 更新（同分支补丁升级）：先检查 php.net 最新版本，再转后台任务编译升级
+export const getPhpUpdates = (force = false) =>
+  request.get('/php/updates', { params: { force } });
+export const updatePhpVersion = (version) =>
+  request.post('/php/update', { version });
+
 // 配置（上传限制 / 禁用函数 / 配置修改 共用）
 export const getPhpSettings = (version = '') =>
   request.get('/php/settings', { params: { version } });

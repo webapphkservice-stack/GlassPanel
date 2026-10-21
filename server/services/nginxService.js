@@ -324,6 +324,20 @@ function openBasedirParam(root) {
   return value ? `        fastcgi_param PHP_ADMIN_VALUE "open_basedir=${value}";` : '';
 }
 
+// PHP 处理块：新建站点与存量静态站点启用 PHP 共用同一份格式，保证两种入口生成的配置一致
+function phpLocationLines(fpmListen, root) {
+  const isolation = openBasedirParam(root);
+  return [
+    '    location ~ \\.php$ {',
+    `        fastcgi_pass ${fpmListen};`,
+    '        fastcgi_index index.php;',
+    '        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;',
+    ...(isolation ? [isolation] : []),
+    '        include fastcgi_params;',
+    '    }',
+  ];
+}
+
 // siteBody：生成 server 块内部主体行（反代或静态/PHP 根目录），供 HTTP 与 HTTPS 两种 server 块共用
 function buildSiteBodyLines({ root, proxyPass, rewrite, type, fpmListen, logName }) {
   const lines = [];
@@ -353,14 +367,7 @@ function buildSiteBodyLines({ root, proxyPass, rewrite, type, fpmListen, logName
     }
     if (isPhp) {
       lines.push('');
-      lines.push('    location ~ \\.php$ {');
-      lines.push(`        fastcgi_pass ${fpmListen};`);
-      lines.push('        fastcgi_index index.php;');
-      lines.push('        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;');
-      const isolation = openBasedirParam(root);
-      if (isolation) lines.push(isolation);
-      lines.push('        include fastcgi_params;');
-      lines.push('    }');
+      lines.push(...phpLocationLines(fpmListen, root));
     }
   }
   return lines;
@@ -443,6 +450,112 @@ function findPhpLocationRanges(text) {
   return ranges;
 }
 
+// 定位配置里所有 server 块的范围，记录块内主体区间，供按站点注入/移除 PHP 指令使用。
+// 与 parseServerBlocks 一样用花括号配对，嵌套的 location / if 不参与边界判断
+function findServerBlockRanges(text) {
+  const ranges = [];
+  const re = /server\s*\{/g;
+  let hit;
+  while ((hit = re.exec(text)) !== null) {
+    const open = hit.index + hit[0].length - 1;
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < text.length; i += 1) {
+      if (text[i] === '{') depth += 1;
+      else if (text[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+    if (end < 0) break;
+    ranges.push({ bodyStart: open + 1, bodyEnd: end - 1 });
+    re.lastIndex = end;
+  }
+  return ranges;
+}
+
+// 调整 server 块内的 index 指令：启用 PHP 时把 index.php 放到首位，禁用时移除该项。
+// 原配置没有 index 指令时启用后补一行，避免只加 fastcgi 块却仍以 index.html 为默认首页
+function adjustIndexDirective(body, enable) {
+  const re = /^([ \t]*)index[ \t]+([^;\r\n]+);/m;
+  const hit = re.exec(body);
+  if (hit) {
+    let tokens = hit[2].trim().split(/\s+/).filter(Boolean);
+    if (enable) {
+      if (!tokens.includes('index.php')) tokens = ['index.php', ...tokens];
+    } else {
+      tokens = tokens.filter((token) => token !== 'index.php');
+    }
+    if (!tokens.length) tokens = ['index.html', 'index.htm'];
+    return body.replace(re, `${hit[1]}index ${tokens.join(' ')};`);
+  }
+  if (!enable) return body;
+  const rootHit = /^([ \t]*)root[ \t]+[^;\r\n]+;[ \t]*$/m.exec(body);
+  if (!rootHit) return body;
+  const at = rootHit.index + rootHit[0].length;
+  return `${body.slice(0, at)}\n${rootHit[1]}index index.php index.html index.htm;${body.slice(at)}`;
+}
+
+// 为站点配置启用 PHP：对每个含 root 的业务 server 块注入 PHP 处理块（已有则只改转发目标），
+// 并同步 index 指令。返回是否新增了处理块，便于调用方区分「切换版本」与「由静态启用」
+function enablePhpInConfig(text, { fpmListen, root }) {
+  const ranges = findServerBlockRanges(text);
+  let out = text;
+  let injected = 0;
+  // 从后往前处理，前面块的偏移不会被插入内容影响
+  for (const range of ranges.reverse()) {
+    const body = out.slice(range.bodyStart, range.bodyEnd);
+    if (!/\broot\s+[^;\r\n]+;/.test(body)) continue;
+    if (/\bproxy_pass\s+[^;\r\n]+;/.test(body)) continue;
+    if (!/\bfastcgi_pass\s+[^;\r\n]+;/.test(body)) injected += 1;
+    const blockRoot = body.match(/\broot\s+([^;\r\n]+);/)?.[1]?.trim() || root;
+    // 已有 fastcgi_pass 的块只替换转发目标，避免重复写入 location 块
+    let nextBody = body.replace(/^([ \t]*fastcgi_pass[ \t]+)[^;\r\n]+;/gm, (m, prefix) => `${prefix}${fpmListen};`);
+    if (!/\bfastcgi_pass\s+[^;\r\n]+;/.test(body)) {
+      const trimmed = nextBody.replace(/\s*$/, '');
+      nextBody = `${trimmed}\n\n${phpLocationLines(fpmListen, blockRoot).join('\n')}\n`;
+    }
+    const adjusted = adjustIndexDirective(nextBody, true);
+    out = `${out.slice(0, range.bodyStart)}${adjusted}${out.slice(range.bodyEnd)}`;
+  }
+  return { text: out, injected };
+}
+
+// 将站点配置改回静态 HTML：删除所有 PHP 处理块（含其中的 open_basedir 下发），
+// 并从 index 指令中移除 index.php
+function disablePhpInConfig(text) {
+  let out = text;
+  let removed = 0;
+  for (const [rawStart, rawEnd] of findPhpLocationRanges(out).reverse()) {
+    let start = rawStart;
+    while (start > 0 && (out[start - 1] === ' ' || out[start - 1] === '\t')) start -= 1;
+    // 块前若是空行一并删除，避免移除后留下连续空行
+    if (start > 0 && out[start - 1] === '\n') {
+      const prevLineStart = out.lastIndexOf('\n', start - 2) + 1;
+      if (!out.slice(prevLineStart, start - 1).trim()) start = prevLineStart;
+    }
+    let end = rawEnd;
+    while (end < out.length && (out[end] === ' ' || out[end] === '\t')) end += 1;
+    if (out[end] === '\r') end += 1;
+    if (out[end] === '\n') end += 1;
+    out = `${out.slice(0, start)}${out.slice(end)}`;
+    removed += 1;
+  }
+  if (removed) {
+    const ranges = findServerBlockRanges(out);
+    for (const range of ranges.reverse()) {
+      const body = out.slice(range.bodyStart, range.bodyEnd);
+      const adjusted = adjustIndexDirective(body, false);
+      if (adjusted === body) continue;
+      out = `${out.slice(0, range.bodyStart)}${adjusted}${out.slice(range.bodyEnd)}`;
+    }
+  }
+  return { text: out, removed };
+}
+
 // 为存量 PHP 站点补写目录隔离：向 siteBody 写入的位置（fastcgi_pass 之后）注入同一行，
 // 已注入的文件不重复写；写前备份，校验失败回滚
 async function enableSiteOpenBasedir(siteName) {
@@ -495,6 +608,128 @@ async function enableSiteOpenBasedir(siteName) {
     openBasedir: openBasedirValue(site.root),
     backup: backupPath,
     reloaded: reload.exitCode === 0,
+  };
+}
+
+// 设置站点 PHP 版本：version 传具体版本时启用 PHP 或切换版本，传空字符串表示改回静态 HTML。
+// 已停止的站点配置位于 .disabled 目录，同样改写，重启站点后生效
+async function setSitePhpVersion(siteName, version) {
+  const key = String(siteName || '').trim();
+  if (!SITE_NAME_RE.test(key)) throw new Error('非法站点名称');
+  const targetVersion = String(version ?? '').trim();
+
+  const site = (await listSites()).find((item) => item.name === key);
+  if (!site || !site.file) throw new Error('站点不存在');
+  if (site.proxyPass) throw new Error('反向代理站点不经过 PHP-FPM，无法设置 PHP 版本');
+  if (!site.root) throw new Error('站点未配置网站根目录，无法设置 PHP 版本');
+
+  // 目标为静态 HTML：删除 PHP 处理块；本身已是静态站点则无需改动
+  if (!targetVersion) {
+    if (site.type !== 'php') {
+      return {
+        file: site.file,
+        type: 'html',
+        phpVersion: '',
+        fpmListen: '',
+        changed: false,
+        enabled: site.enabled !== false,
+        reloaded: false,
+      };
+    }
+    const original = await fs.promises.readFile(site.file, 'utf8');
+    const { text: next, removed } = disablePhpInConfig(original);
+    if (!removed) throw new Error('站点配置中未找到 PHP 处理块，无法改回静态 HTML');
+
+    const backupPath = `${site.file}.${Date.now()}.bak`;
+    await fs.promises.writeFile(backupPath, original, 'utf8');
+    await fs.promises.writeFile(site.file, next, 'utf8');
+
+    const test = await run('nginx', ['-t']);
+    if (test.exitCode !== 0) {
+      await fs.promises.writeFile(site.file, original, 'utf8');
+      await fs.promises.unlink(backupPath).catch(() => {});
+      throw new Error(`配置校验失败，已回滚：${(test.stderr || test.stdout || '').trim()}`);
+    }
+
+    let reloaded = false;
+    if (site.enabled !== false) {
+      const reload = await run('systemctl', ['reload', servicesConfig.service]);
+      if (reload.exitCode !== 0) {
+        await fs.promises.writeFile(site.file, original, 'utf8');
+        await fs.promises.unlink(backupPath).catch(() => {});
+        await run('nginx', ['-t']);
+        await run('systemctl', ['reload', servicesConfig.service]);
+        throw new Error(`Nginx 重载失败，已回滚：${(reload.stderr || reload.stdout || '').trim()}`);
+      }
+      reloaded = true;
+    }
+    return {
+      file: site.file,
+      type: 'html',
+      phpVersion: '',
+      fpmListen: '',
+      changed: true,
+      enabled: site.enabled !== false,
+      backup: backupPath,
+      reloaded,
+    };
+  }
+
+  const fpmListen = await phpService.getFpmListen(targetVersion);
+  if (!fpmListen) throw new Error(`未检测到 PHP ${targetVersion} 可用的 PHP-FPM，请确认该版本已安装并启动`);
+  // 已是指定版本的 PHP 站点，无需改写配置
+  if (site.type === 'php' && site.fpmListen === fpmListen) {
+    return {
+      file: site.file,
+      type: 'php',
+      phpVersion: site.phpVersion || targetVersion,
+      fpmListen,
+      changed: false,
+      enabled: site.enabled !== false,
+      reloaded: false,
+    };
+  }
+
+  const original = await fs.promises.readFile(site.file, 'utf8');
+  // 静态站点会注入完整 PHP 处理块，PHP 站点则只替换转发目标
+  const { text: next, injected } = enablePhpInConfig(original, { fpmListen, root: site.root });
+  if (next === original) throw new Error('站点配置中没有可启用 PHP 的 server 块，无法设置 PHP 版本');
+
+  const backupPath = `${site.file}.${Date.now()}.bak`;
+  await fs.promises.writeFile(backupPath, original, 'utf8');
+  await fs.promises.writeFile(site.file, next, 'utf8');
+
+  const test = await run('nginx', ['-t']);
+  if (test.exitCode !== 0) {
+    await fs.promises.writeFile(site.file, original, 'utf8');
+    await fs.promises.unlink(backupPath).catch(() => {});
+    throw new Error(`配置校验失败，已回滚：${(test.stderr || test.stdout || '').trim()}`);
+  }
+
+  // 已停止的站点未被 nginx 加载，改写配置即可，无需重载
+  let reloaded = false;
+  if (site.enabled !== false) {
+    const reload = await run('systemctl', ['reload', servicesConfig.service]);
+    if (reload.exitCode !== 0) {
+      // 重载失败说明新配置未生效，恢复原配置并再次重载，避免站点继续使用旧配置
+      await fs.promises.writeFile(site.file, original, 'utf8');
+      await fs.promises.unlink(backupPath).catch(() => {});
+      await run('nginx', ['-t']);
+      await run('systemctl', ['reload', servicesConfig.service]);
+      throw new Error(`Nginx 重载失败，已回滚：${(reload.stderr || reload.stdout || '').trim()}`);
+    }
+    reloaded = true;
+  }
+  return {
+    file: site.file,
+    type: 'php',
+    phpVersion: targetVersion,
+    fpmListen,
+    changed: true,
+    converted: injected > 0,
+    enabled: site.enabled !== false,
+    backup: backupPath,
+    reloaded,
   };
 }
 
@@ -629,6 +864,7 @@ async function createSiteInner({
   runDir,
   rewrite,
   type,
+  phpVersion,
   ssl,
   email,
   createDb,
@@ -643,6 +879,7 @@ async function createSiteInner({
   const runDirClean = String(runDir || '').trim().replace(/^\/+|\/+$/g, '');
   const rewriteKey = String(rewrite || 'none').trim();
   const typeKey = String(type || 'html').trim();
+  const phpVersionKey = String(phpVersion || '').trim();
   const wantSsl = ssl === true || ssl === 'true';
   const wantDb = createDb === true || createDb === 'true';
   const mail = String(email || '').trim();
@@ -665,11 +902,16 @@ async function createSiteInner({
   }
   if (!['html', 'php'].includes(typeKey)) throw new Error('不支持的站点类型');
 
-  // PHP 站点需要 fastcgi_pass：从已安装的 php-fpm pool 解析，解析不到说明环境缺 PHP
+  // PHP 站点需要 fastcgi_pass：从已安装的 php-fpm pool 解析，解析不到说明环境缺 PHP。
+  // phpVersion 为空时使用面板默认版本（已安装的最高源码编译版本）
   let fpmListen = '';
   if (typeKey === 'php' && !proxy) {
-    fpmListen = await phpService.getFpmListen();
-    if (!fpmListen) throw new Error('未检测到可用的 PHP-FPM，请先在应用中心安装并启动 PHP');
+    fpmListen = await phpService.getFpmListen(phpVersionKey);
+    if (!fpmListen) {
+      throw new Error(phpVersionKey
+        ? `未检测到 PHP ${phpVersionKey} 可用的 PHP-FPM，请确认该版本已安装并启动`
+        : '未检测到可用的 PHP-FPM，请先在应用中心安装并启动 PHP');
+    }
   }
 
   const filePath = path.join(SITE_DIR, `${siteName}.conf`);
@@ -1139,6 +1381,7 @@ module.exports = {
   writeConfig,
   enableSiteLog,
   enableSiteOpenBasedir,
+  setSitePhpVersion,
   buildSiteConfig,
   buildDefaultPage,
   NGINX_LOG_DIR,

@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { run } = require('./commandRunner');
@@ -660,6 +661,112 @@ function refreshCompileMarker() {
   }
 }
 
+// ---------- 版本更新（补丁升级） ----------
+
+const UPDATE_CACHE_TTL = 10 * 60 * 1000;
+let updateCache = { at: 0, data: null };
+
+function fetchJson(url, timeout = 8000) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { timeout, headers: { 'User-Agent': 'GlassPanel/1.0' } }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode}`));
+        return;
+      }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > 2 * 1024 * 1024) req.destroy(new Error('响应内容过大'));
+      });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('请求超时')));
+    req.on('error', reject);
+  });
+}
+
+// php.net 官方发布列表：取指定分支（如 8.5）的最新补丁版本。
+// 网络不可达时返回空串，前端按「暂无更新信息」展示，不影响本地面板
+async function fetchLatestPatch(minor) {
+  try {
+    const data = await fetchJson(`https://www.php.net/releases/index.php?json&version=${encodeURIComponent(minor)}&max=1`);
+    const versions = Object.keys(data || {}).filter((v) => /^\d+\.\d+\.\d+$/.test(v));
+    if (!versions.length) return '';
+    return versions.sort(compareVersions).pop();
+  } catch (err) {
+    return '';
+  }
+}
+
+// 检查各源码编译版本是否有同分支的补丁更新（结果缓存 10 分钟）
+async function listUpdates(force = false) {
+  if (!force && updateCache.data && Date.now() - updateCache.at < UPDATE_CACHE_TTL) {
+    // 更新状态依赖后台任务，不能跟着版本缓存一起过期
+    return {
+      ...updateCache.data,
+      versions: updateCache.data.versions.map((v) => ({ ...v, updating: jobService.isRunning(v.jobKey) })),
+    };
+  }
+  const installed = listInstalled().filter((i) => i.source === 'compiled');
+  const minors = [...new Set(installed.map((i) => i.version.replace(/\.\d+$/, '')))];
+  const pairs = await Promise.all(minors.map(async (minor) => {
+    const remote = await fetchLatestPatch(minor);
+    // php.net 列表可能因镜像/缓存滞后，与面板内置的安全补丁基线取较高者
+    let baseline = '';
+    try {
+      // 延迟 require：appService 依赖本模块，提前 require 会造成循环依赖
+      baseline = require('./appService').getSourceBuildVersion('php', minor) || '';
+    } catch (err) {
+      baseline = '';
+    }
+    const target = compareVersions(remote, baseline) >= 0 ? remote : baseline;
+    return [minor, target];
+  }));
+  const latest = new Map(pairs);
+  const versions = installed.map((item) => {
+    const target = latest.get(item.version.replace(/\.\d+$/, '')) || '';
+    const key = `php-update-${item.version}`;
+    return {
+      version: item.version,
+      latest: target,
+      hasUpdate: !!target && compareVersions(target, item.version) > 0,
+      jobKey: key,
+      updating: jobService.isRunning(key),
+    };
+  });
+  const data = { checkedAt: Date.now(), versions };
+  updateCache = { at: Date.now(), data };
+  return data;
+}
+
+// 更新到同分支最新补丁版本：新版本先编译到独立目录，配置迁移并启动成功后才删除旧版本
+async function updateVersion(version) {
+  const item = findItem(version);
+  if (!item) throw new Error('未检测到该 PHP 版本');
+  if (item.source !== 'compiled') throw new Error('软件包安装的 PHP 请通过系统包管理器更新');
+  const { versions } = await listUpdates(true);
+  const info = versions.find((v) => v.version === item.version);
+  if (!info || !info.latest) {
+    throw new Error(`无法获取 PHP ${item.version.replace(/\.\d+$/, '')} 的最新版本，请检查服务器网络`);
+  }
+  if (!info.hasUpdate) throw new Error(`PHP ${item.version} 已是最新补丁版本`);
+  const key = `php-update-${item.version}`;
+  if (jobService.isRunning(key)) throw new Error(`PHP ${item.version} 正在更新中，请等待当前任务完成`);
+  if (jobService.isRunning('php')) throw new Error('应用中心正在执行 PHP 更新任务，请等待当前任务完成');
+  // 延迟 require：appService 依赖本模块，提前 require 会造成循环依赖
+  const appService = require('./appService');
+  const job = await appService.startPhpUpdate(item.version, info.latest);
+  return { job, key, from: item.version, to: info.latest };
+}
+
 // ---------- 日志 ----------
 
 // 错误日志路径：优先 php-fpm.conf 的 error_log，否则用默认路径
@@ -798,6 +905,9 @@ module.exports = {
   installExtension,
   uninstallExtension,
   uninstallVersion,
+  listUpdates,
+  updateVersion,
+  refreshCompileMarker,
   getLogs,
   clearLogs,
   setSlowlog,

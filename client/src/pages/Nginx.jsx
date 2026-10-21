@@ -14,6 +14,7 @@ import {
   stopNginxSite,
   restartNginxSite,
   enableSiteOpenBasedir,
+  setSitePhpVersion,
   getProvisionStatus,
 } from '@/api/nginx';
 import GlassCard from '@/components/common/GlassCard';
@@ -23,6 +24,7 @@ import GlassModal from '@/components/common/GlassModal';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
 import { getMysqlStatus } from '@/api/mysql';
+import { getPhpStatus } from '@/api/php';
 import SiteFileBrowser from '@/components/site/SiteFileBrowser';
 import SiteTrafficModal from '@/components/site/SiteTrafficModal';
 import SiteBackupModal from '@/components/site/SiteBackupModal';
@@ -49,6 +51,7 @@ const EMPTY_FORM = {
   runDir: '',
   rewrite: 'none',
   type: 'html',
+  phpVersion: '',
   ssl: false,
   email: '',
   createDb: false,
@@ -86,6 +89,9 @@ export default function Nginx() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [rootTouched, setRootTouched] = useState(false);
   const [mysqlStatus, setMysqlStatus] = useState('unknown');
+  // 已安装的 PHP 版本：创建 PHP 站点时选择，站点列表中用于切换
+  const [phpVersions, setPhpVersions] = useState([]);
+  const [switchingSite, setSwitchingSite] = useState('');
   const [deletingSite, setDeletingSite] = useState('');
   // 正在停止/重启的站点名，用于禁用按钮并显示进行中文案
   const [actingSite, setActingSite] = useState('');
@@ -126,9 +132,18 @@ export default function Nginx() {
     }
   }
 
+  async function fetchPhpVersions() {
+    try {
+      const data = await getPhpStatus();
+      setPhpVersions(data.versions || []);
+    } catch (err) {
+      setPhpVersions([]);
+    }
+  }
+
   useEffect(() => {
     setInitialLoading(true);
-    Promise.all([fetchStatus(), fetchSites()]).finally(() => setInitialLoading(false));
+    Promise.all([fetchStatus(), fetchSites(), fetchPhpVersions()]).finally(() => setInitialLoading(false));
   }, []);
 
   // 开通进度轮询：创建期间每秒拉取只读快照，抵达终态或进度过期后自动停止。
@@ -323,6 +338,45 @@ export default function Nginx() {
     }
   }
 
+  // 设置站点 PHP 版本：选择具体版本即启用 PHP（或切换版本），选择「静态 HTML」则移除 PHP 处理块
+  async function handleSwitchPhpVersion(site, nextVersion) {
+    const current = site.type === 'php' ? (site.phpVersion || '') : '';
+    if ((nextVersion || '') === current) return;
+    const label = site.serverName || site.name;
+    const enabling = nextVersion && site.type !== 'php';
+    const disabling = !nextVersion && site.type === 'php';
+    const ok = await uiConfirm({
+      title: t('nginx.switchPhpTitle'),
+      message: enabling
+        ? t('nginx.enablePhpConfirm', { name: label, version: nextVersion })
+        : disabling
+          ? t('nginx.disablePhpConfirm', { name: label })
+          : t('nginx.switchPhpConfirm', { name: label, from: site.phpVersion || '-', to: nextVersion }),
+      confirmText: t('nginx.switchPhpConfirmBtn'),
+    });
+    if (!ok) {
+      // 取消时拉一次列表，让下拉框回到站点真实版本
+      fetchSites();
+      return;
+    }
+    setSwitchingSite(site.name);
+    try {
+      await setSitePhpVersion(site.name, nextVersion || '');
+      if (disabling) {
+        toast(t('nginx.disablePhpDone', { name: label }), 'success');
+      } else if (enabling) {
+        toast(t('nginx.enablePhpDone', { name: label, version: nextVersion }), 'success');
+      } else {
+        toast(t('nginx.switchPhpDone', { name: label, version: nextVersion }), 'success');
+      }
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    } finally {
+      await fetchSites();
+      setSwitchingSite('');
+    }
+  }
+
   async function handleTest() {
     try {
       const data = await testNginxConfig();
@@ -366,6 +420,7 @@ export default function Nginx() {
     setForm(EMPTY_FORM);
     setRootTouched(false);
     setAddOpen(true);
+    fetchPhpVersions();
     try {
       const data = await getMysqlStatus();
       setMysqlStatus(data.status);
@@ -458,8 +513,8 @@ export default function Nginx() {
         </div>
       </GlassCard>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        <GlassCard className="lg:col-span-2">
+      <div className="space-y-6">
+        <GlassCard>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-lg font-semibold">{t('nginx.sites')}</h2>
             <div className="flex items-center gap-3">
@@ -504,10 +559,29 @@ export default function Nginx() {
                     <td className="py-3 text-white/70">{site.listen}</td>
                     <td className="py-3 text-white/70">{site.root || site.proxyPass || '-'}</td>
                     <td className="py-3">
-                      {site.phpVersion ? (
+                      {!site.proxyPass ? (
                         <span className="flex flex-wrap items-center gap-2">
-                          <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-xs text-indigo-300">PHP {site.phpVersion}</span>
-                          {site.isolated ? (
+                          <select
+                            value={site.type === 'php' ? (site.phpVersion || '') : ''}
+                            onChange={(e) => handleSwitchPhpVersion(site, e.target.value)}
+                            disabled={switchingSite === site.name || actingSite === site.name || deletingSite === site.name}
+                            title={t('nginx.switchPhpHint')}
+                            className="max-w-[220px] rounded-full border border-indigo-500/30 bg-indigo-500/15 px-2 py-0.5 text-xs text-indigo-300 outline-none transition-colors hover:bg-indigo-500/25 focus:border-indigo-300 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <option value="" className="bg-slate-900">{t('nginx.staticHtml')}</option>
+                            {!phpVersions.some((v) => v.version === site.phpVersion) && site.phpVersion && (
+                              <option value={site.phpVersion} className="bg-slate-900">PHP {site.phpVersion}</option>
+                            )}
+                            {phpVersions.map((v) => (
+                              <option key={v.version} value={v.version} className="bg-slate-900">
+                                PHP {v.version}{v.status !== 'active' ? ` (${t('nginx.phpVersionInactive')})` : ''}
+                              </option>
+                            ))}
+                          </select>
+                          {switchingSite === site.name && (
+                            <span className="text-xs text-white/50">{t('nginx.switching')}</span>
+                          )}
+                          {site.type === 'php' && (site.isolated ? (
                             <span
                               title={t('nginx.isolationOnHint')}
                               className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-300"
@@ -524,7 +598,7 @@ export default function Nginx() {
                             >
                               {actingSite === site.name ? t('nginx.acting') : t('nginx.notIsolated')}
                             </button>
-                          )}
+                          ))}
                         </span>
                       ) : (
                         <span className="text-white/40">-</span>
@@ -620,7 +694,7 @@ export default function Nginx() {
 
         <GlassCard>
           <h2 className="mb-4 text-lg font-semibold">{t('nginx.commonConfig')}</h2>
-          <div className="space-y-3">
+          <div className="grid gap-3 md:grid-cols-2">
             <button
               onClick={() => openEditor('/etc/nginx/nginx.conf')}
               className="flex w-full items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm hover:bg-white/10 transition-colors"
@@ -694,6 +768,27 @@ export default function Nginx() {
               {t(TYPE_OPTIONS.find((o) => o.value === form.type)?.hintKey)}
             </p>
           </div>
+          {form.type === 'php' && (
+            <div>
+              <label className="mb-1 block text-sm text-white/70">{t('nginx.phpVersion')}</label>
+              <select
+                value={form.phpVersion}
+                onChange={(e) => setForm({ ...form, phpVersion: e.target.value })}
+                className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm outline-none focus:border-cyan-400"
+              >
+                <option value="" className="bg-slate-900">{t('nginx.phpVersionDefault')}</option>
+                {phpVersions.map((v) => (
+                  <option key={v.version} value={v.version} className="bg-slate-900">
+                    PHP {v.version}{v.status !== 'active' ? ` (${t('nginx.phpVersionInactive')})` : ''}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-white/40">{t('nginx.phpVersionHint')}</p>
+              {phpVersions.length === 0 && (
+                <p className="mt-1 text-xs text-amber-300">{t('nginx.noPhpInstalled')}</p>
+              )}
+            </div>
+          )}
           <div>
             <label className="mb-1 block text-sm text-white/70">{t('nginx.domain')}</label>
             <input
