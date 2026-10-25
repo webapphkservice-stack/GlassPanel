@@ -658,7 +658,7 @@
     "certList": "证书列表",
     "applyCert": "申请证书",
     "renew": "续期",
-    "domainPlaceholder": "域名",
+    "domainPlaceholder": "域名（支持多个，空格分隔）",
     "emailPlaceholder": "邮箱（可选）",
     "apply": "提交申请",
     "renewConfirm": "确定续期证书 {domain} 吗？",

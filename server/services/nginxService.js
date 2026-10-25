@@ -1063,23 +1063,35 @@ async function createSiteInner({
   let sslResult = null;
   let database = null;
 
+  // 一张证书覆盖站点的全部域名：多域名站点（如 www + 裸域名）不能只签首个域名，
+  // 否则其余域名访问 443 会因证书不匹配而失败
+  const sslDomains = [...new Set(
+    String(domain || '')
+      .split(/\s+/)
+      .map((d) => d.trim())
+      .filter((d) => d && d !== '_' && !d.includes('*'))
+  )];
+
   if (wantSsl) {
-    if (!primary) {
+    if (sslDomains.length === 0) {
       warnings.push('未找到可用于签发证书的域名');
       reporter.fail('ssl', '未找到可用于签发证书的域名');
     } else if (reuseCert) {
       // 配置中已引用面板已有证书，无需重新签发
-      sslResult = { domain: primary, success: true, reused: true };
+      sslResult = { domain: primary, domains: sslDomains, success: true, reused: true };
       reporter.complete('ssl', '已复用面板已有证书');
     } else {
-      // 站点已占用 80 端口，必须使用 nginx 插件签发而非 standalone
+      // 站点已占用 80 端口，必须使用 nginx 插件签发而非 standalone；
+      // --expand 用于已有单域名证书时补全新域名，而不是报错退出
       reporter.begin('ssl');
-      reporter.note('ssl', `正在为 ${primary} 签发证书`);
-      const args = ['--nginx', '-d', primary, '--agree-tos', '-n', '--redirect'];
+      reporter.note('ssl', `正在为 ${sslDomains.join('、')} 签发证书`);
+      const args = ['--nginx'];
+      for (const d of sslDomains) args.push('-d', d);
+      args.push('--agree-tos', '-n', '--redirect', '--expand');
       if (mail) args.push('-m', mail);
       else args.push('--register-unsafely-without-email');
       const result = await run('certbot', args, { timeout: 180000 });
-      sslResult = { domain: primary, success: result.exitCode === 0 };
+      sslResult = { domain: primary, domains: sslDomains, success: result.exitCode === 0 };
       if (result.exitCode !== 0) {
         const detail = (result.stderr || result.stdout || '').trim().slice(0, 300);
         warnings.push(`SSL 证书签发失败：${detail}`);

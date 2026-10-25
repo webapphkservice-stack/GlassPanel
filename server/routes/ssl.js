@@ -21,9 +21,12 @@ router.post('/issue', async (req, res, next) => {
     const { domain, email } = req.body || {};
     const result = await ssl.issueCertificate(domain, email);
     if (result.exitCode === 0) {
-      const cert = (await ssl.listCertificates()).find((c) => c.domain === domain);
+      // 支持一次签发/补全多个域名：签发后的证书目录名可能不是用户输入的首个域名
+      const wanted = ssl.normalizeDomains(domain);
+      const cert = (await ssl.listCertificates())
+        .find((c) => c.domain === wanted[0] || (c.domains || []).includes(wanted[0]));
       if (cert) {
-        store.saveCertificate(domain, cert.certPath, cert.keyPath, cert.issuedAt, cert.expiresAt, true);
+        store.saveCertificate(cert.domain, cert.certPath, cert.keyPath, cert.issuedAt, cert.expiresAt, true);
       }
     }
     store.addLog(req.user.username, 'ssl_issue', domain);
