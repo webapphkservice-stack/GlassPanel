@@ -4,12 +4,15 @@
   "description": "玻璃面板前端",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/copy-monaco.js",
     "dev": "vite",
+    "prebuild": "node scripts/copy-monaco.js",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",
+    "monaco-editor": "^0.57.0",
     "axios": "^1.6.8",
     "i18next": "^26.4.2",
     "i18next-browser-languagedetector": "^8.2.1",

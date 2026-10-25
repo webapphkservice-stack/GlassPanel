@@ -22,7 +22,15 @@ const cleanupRouter = require('./routes/cleanup');
 
 const app = express();
 
-app.use(helmet());
+// 允许 blob: Worker：Monaco 编辑器把 worker 脚本包装成 blob URL 后创建，
+// 否则会被默认 CSP（default-src 'self'）拦截，编辑器功能区无法正常工作
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      'worker-src': ["'self'", 'blob:'],
+    },
+  },
+}));
 app.use(cors({ origin: config.clientUrl, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));

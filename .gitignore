@@ -6,6 +6,9 @@ client/dist/
 dist/
 build/
 
+# Monaco 编辑器本地资源（构建时从 node_modules 复制）
+client/public/monaco/
+
 # 环境变量（仅保留模板 .env.example）
 .env
 .env.*
