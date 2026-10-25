@@ -59,6 +59,11 @@ function initTables() {
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
   `);
 }
 initTables();
@@ -210,5 +215,21 @@ module.exports = {
   },
   deleteManagedDatabase(name) {
     return db.prepare('DELETE FROM mysql_databases WHERE name = ?').run(name);
+  },
+
+  // 面板设置：键值对存储，未设置的键由调用方使用默认值
+  getSetting(key, fallback = '') {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return row && row.value !== null ? row.value : fallback;
+  },
+  getSettings() {
+    return db.prepare('SELECT key, value FROM settings').all()
+      .reduce((acc, row) => ({ ...acc, [row.key]: row.value }), {});
+  },
+  setSetting(key, value) {
+    return db.prepare(`
+      INSERT INTO settings (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, value);
   },
 };

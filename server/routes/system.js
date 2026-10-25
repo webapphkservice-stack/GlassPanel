@@ -38,6 +38,36 @@ router.get('/services', async (req, res, next) => {
   }
 });
 
+// 面板设置：当前仅面板名称，未设置时由前端回退到默认品牌名
+router.get('/settings', (req, res, next) => {
+  try {
+    res.json({ settings: store.getSettings() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/settings', (req, res, next) => {
+  try {
+    const raw = req.body?.panelName;
+    if (raw !== undefined) {
+      const panelName = String(raw).trim();
+      // 控制字符会破坏页面标题与日志，长度上限避免侧边栏溢出
+      if (/[\u0000-\u001f\u007f]/.test(panelName)) {
+        return res.status(400).json({ error: '面板名称不能包含换行或控制字符' });
+      }
+      if (panelName.length > 32) {
+        return res.status(400).json({ error: '面板名称最多 32 个字符' });
+      }
+      store.setSetting('panelName', panelName);
+      store.addLog(req.user.username, 'system_settings_update', `panelName=${panelName}`);
+    }
+    res.json({ success: true, settings: store.getSettings() });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post('/restart', async (req, res, next) => {
   try {
     store.addLog(req.user.username, 'system_restart', '');

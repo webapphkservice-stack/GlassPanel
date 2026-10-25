@@ -56,7 +56,15 @@
     "fail2ban": "Fail2ban",
     "ssl": "SSL",
     "logout": "登出",
-    "version": "版本"
+    "version": "版本",
+    "editPanelName": "修改面板名稱",
+    "panelNameTitle": "修改面板名稱",
+    "panelNameSubtitle": "自訂顯示在左上角的面板名稱，留空則使用預設名稱",
+    "panelNameLabel": "面板名稱",
+    "panelNameHint": "最多 {max} 個字元，留空恢復為預設名稱",
+    "panelNameSaved": "面板名稱已儲存",
+    "panelNameTooLong": "面板名稱最多 {max} 個字元",
+    "panelTitleSuffix": "伺服器管理面板"
   },
   "header": {
     "restartPanel": "重新啟動面板",
@@ -229,7 +237,9 @@
     "addSite": "新增站台",
     "serverName": "Server Name",
     "listen": "Listen",
-    "rootProxy": "Root / 代理",
+    "rootProxy": "站台根目錄 / 代理",
+    "runDirLabel": "執行目錄",
+    "siteNameHint": "支援中文、字母、數字、點、底線和短橫線",
     "diskUsage": "空間大小",
     "phpVersion": "PHP 版本",
     "ssl": "SSL",

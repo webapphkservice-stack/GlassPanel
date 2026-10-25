@@ -12,7 +12,12 @@ const SITE_DIR = path.join(servicesConfig.configDir, 'conf.d');
 // 已停止的站点配置存放目录：nginx.conf 的 include 只匹配 conf.d/*.conf 一层，
 // 子目录不会被加载，因此把配置移到此处即可让站点下线，同时保留文件便于随时重启
 const SITE_DISABLED_DIR = path.join(SITE_DIR, '.disabled');
-const SITE_NAME_RE = /^[A-Za-z0-9._-]+$/;
+// 站点名称：允许中文、字母、数字、点、下划线与短横线。
+// 首字符不能是点，避免生成隐藏配置文件；不含路径分隔符与空白，杜绝路径穿越
+const SITE_NAME_RE = /^[\p{L}\p{N}_-][\p{L}\p{N}._-]*$/u;
+// 站点根目录标记：建站时写入配置头部，记录用户填写的网站根目录。
+// nginx 的 root 可能是网站根目录下的运行目录（如 public），二者需要区分展示
+const SITE_ROOT_MARK_RE = /^#\s*glass-panel:site-root\s+(.+?)\s*$/m;
 // 停止站点时在原位置留下的占位页标记：占位页保留原 server_name 与监听端口，
 // 使该域名仍由本 server 块处理，否则请求会落到同端口上其它站点（域名串站）
 const STOP_PAGE_MARK = '# glass-panel:stopped-site';
@@ -43,6 +48,23 @@ const REWRITE_PRESETS = {
     '    }',
   ],
 };
+
+// 解析站点根目录（用户填写的网站根目录）：
+// 优先使用配置中的标记；旧站点没有标记时按约定推断 —— /var/www 下的一级目录，
+// 从而把 nginx root 中的运行目录（public、web 等）剥离出来
+function resolveSiteDir(text, root) {
+  const marked = String(text || '').match(SITE_ROOT_MARK_RE)?.[1]?.trim();
+  if (marked) return marked;
+
+  const raw = String(root || '').trim();
+  if (!raw || !raw.startsWith('/')) return '';
+  const base = path.resolve(raw);
+  const rel = path.relative(WEB_ROOT, base);
+  if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+    return path.join(WEB_ROOT, rel.split(path.sep)[0]);
+  }
+  return base;
+}
 
 // 取首个可用于签发证书的域名（忽略 _ 与泛域名）
 function pickPrimaryDomain(serverName) {
@@ -119,11 +141,14 @@ function parseServerBlocks(stdout, siteDir, fpmByListen = new Map()) {
     return current;
   };
 
-  // 停止占位页文件集合：标记写在文件头部，按 nginx -T 输出的文件分段识别
+  // 停止占位页文件集合与站点根目录标记：均按 nginx -T 输出的文件分段识别
   const stopPageFiles = new Set();
+  const fileTextByFile = new Map();
   marks.forEach((item, idx) => {
     const end = idx + 1 < marks.length ? marks[idx + 1].index : stdout.length;
-    if (stdout.slice(item.index, end).includes(STOP_PAGE_MARK)) stopPageFiles.add(item.file);
+    const segment = stdout.slice(item.index, end);
+    fileTextByFile.set(item.file, segment);
+    if (segment.includes(STOP_PAGE_MARK)) stopPageFiles.add(item.file);
   });
 
   // 用花括号配对切块：嵌套的 location / if 块内部的 } 不能当作 server 块结束，
@@ -155,12 +180,15 @@ function parseServerBlocks(stdout, siteDir, fpmByListen = new Map()) {
     const listens = [...block.text.matchAll(/listen\s+([^;]+);/g)].map((m) => m[1].trim());
     const proxyPass = block.text.match(/proxy_pass\s+([^;]+);/)?.[1]?.trim() || '';
     const fpmListen = block.text.match(/fastcgi_pass\s+([^;]+);/)?.[1]?.trim() || '';
+    const root = block.text.match(/root\s+([^;]+);/)?.[1]?.trim() || '';
     const site = {
       name: path.basename(file, '.conf'),
       file,
       serverName,
       listen: listens.join(', '),
-      root: block.text.match(/root\s+([^;]+);/)?.[1]?.trim() || '',
+      // 站点根目录（用户填写的网站根目录）与 nginx 运行目录（root）分开返回
+      siteDir: resolveSiteDir(fileTextByFile.get(file) || '', root),
+      root,
       proxyPass,
       fpmListen,
       phpVersion: fpmByListen.get(fpmListen) || '',
@@ -181,6 +209,7 @@ function parseServerBlocks(stdout, siteDir, fpmByListen = new Map()) {
     }
     const listenSet = [...new Set([...exist.listen.split(', '), ...site.listen.split(', ')].filter(Boolean))];
     exist.listen = listenSet.join(', ');
+    exist.siteDir = exist.siteDir || site.siteDir;
     exist.root = exist.root || site.root;
     exist.proxyPass = exist.proxyPass || site.proxyPass;
     exist.fpmListen = exist.fpmListen || site.fpmListen;
@@ -220,6 +249,7 @@ function parseConfigText(text, file, fpmByListen = new Map()) {
     file,
     serverName: [...new Set(serverNames)].join(' ') || '_',
     listen: [...new Set(listens)].join(', '),
+    siteDir: resolveSiteDir(text, roots[0] || ''),
     root: roots[0] || '',
     proxyPass,
     fpmListen,
@@ -741,7 +771,8 @@ async function getSiteSizes() {
   // 多个站点共用根目录时只统计一次，避免重复遍历大目录
   const cache = new Map();
   for (const site of sites) {
-    const root = String(site.root || '').trim();
+    // 按站点根目录统计（含运行目录之外的 vendor、storage 等），而非仅统计 nginx 运行目录
+    const root = String(site.siteDir || site.root || '').trim();
     if (!root || !root.startsWith('/')) {
       sizes[site.name] = null;
       continue;
@@ -920,8 +951,9 @@ async function createSiteInner({
   if (!wantDb) reporter.skip('database', 'disabled');
 
   if (!SITE_NAME_RE.test(siteName)) {
-    throw new Error('站点名称只能包含字母、数字、点、下划线和短横线');
+    throw new Error('站点名称只能包含中文、字母、数字、点、下划线和短横线');
   }
+  if (siteName.length > 64) throw new Error('站点名称最多 64 个字符');
   if (!domain) throw new Error('请填写域名（server_name）');
   if (!/^\d+$/.test(port)) throw new Error('监听端口必须是数字');
   if (!proxy && !docRoot) throw new Error('请填写网站根目录，或填写反向代理地址');
@@ -1003,7 +1035,11 @@ async function createSiteInner({
     keyPath: reuseCert ? String(keyPath).trim() : '',
     logName: siteName,
   });
-  await fs.promises.writeFile(filePath, content, 'utf8');
+  // 配置头部记录网站根目录：nginx root 可能是其下的运行目录，站点列表需要区分展示
+  const markedContent = (!proxy && docRoot)
+    ? `# glass-panel:site-root ${docRoot}\n${content}`
+    : content;
+  await fs.promises.writeFile(filePath, markedContent, 'utf8');
   reporter.note('directory', `配置文件已写入 ${filePath}`);
 
   // 先校验再重载，校验失败时回滚新配置，避免影响在运行的站点

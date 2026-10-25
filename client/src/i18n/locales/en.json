@@ -62,7 +62,15 @@
     "fail2ban": "Fail2ban",
     "ssl": "SSL",
     "logout": "Logout",
-    "version": "Version"
+    "version": "Version",
+    "editPanelName": "Rename Panel",
+    "panelNameTitle": "Rename Panel",
+    "panelNameSubtitle": "Customize the panel name shown at the top-left; leave blank to use the default",
+    "panelNameLabel": "Panel Name",
+    "panelNameHint": "Up to {max} characters; leave blank to restore the default name",
+    "panelNameSaved": "Panel name saved",
+    "panelNameTooLong": "Panel name must be at most {max} characters",
+    "panelTitleSuffix": "Server Management Panel"
   },
   "header": {
     "restartPanel": "Restart Panel",
@@ -239,7 +247,9 @@
     "addSite": "Add Site",
     "serverName": "Server Name",
     "listen": "Listen",
-    "rootProxy": "Root / Proxy",
+    "rootProxy": "Site Root / Proxy",
+    "runDirLabel": "Run directory",
+    "siteNameHint": "Chinese characters, letters, digits, dots, underscores and hyphens are allowed",
     "diskUsage": "Disk Usage",
     "phpVersion": "PHP Version",
     "ssl": "SSL",

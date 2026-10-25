@@ -587,7 +587,20 @@ export default function Nginx() {
                       </span>
                     </td>
                     <td className="py-3 text-white/70">{site.listen}</td>
-                    <td className="py-3 text-white/70">{site.root || site.proxyPass || '-'}</td>
+                    <td className="py-3 text-white/70">
+                      {site.proxyPass ? (
+                        site.proxyPass
+                      ) : (
+                        <div className="space-y-0.5">
+                          <div>{site.siteDir || site.root || '-'}</div>
+                          {site.siteDir && site.root && site.siteDir !== site.root && (
+                            <div className="text-xs text-white/40">
+                              {t('nginx.runDirLabel')}: {site.root}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </td>
                     <td className="py-3 whitespace-nowrap text-white/70">
                       {siteSizes[site.name] === undefined ? (
                         <span className="text-white/30">…</span>
@@ -767,6 +780,7 @@ export default function Nginx() {
                 placeholder="myblog"
                 className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm outline-none focus:border-cyan-400"
               />
+              <p className="mt-1 text-xs text-white/40">{t('nginx.siteNameHint')}</p>
             </div>
             <div>
               <label className="mb-1 block text-sm text-white/70">{t('nginx.listenPort')}</label>
