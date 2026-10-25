@@ -105,7 +105,9 @@ export default function Ssl() {
                 </div>
                 <div>
                   <h3 className="font-semibold">{cert.domain}</h3>
-                  <p className="text-xs text-white/50">{cert.subject || cert.domain}</p>
+                  <p className="break-all text-xs text-white/50">
+                    {cert.domains?.length ? cert.domains.join('、') : (cert.subject || cert.domain)}
+                  </p>
                 </div>
               </div>
               {cert.autoRenew && <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-xs text-cyan-300">{t('ssl.autoRenew')}</span>}
