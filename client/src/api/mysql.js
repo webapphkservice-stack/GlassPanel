@@ -32,3 +32,12 @@ export const restoreDbBackup = (name, file) =>
   );
 export const deleteDbBackup = (name, file) =>
   request.delete(`/mysql/databases/${encodeURIComponent(name)}/backups`, { params: { file } });
+
+// —— 数据库定时备份任务 ——
+export const getDbBackupTasks = () => request.get('/mysql/backup-tasks');
+export const createDbBackupTask = (data) => request.post('/mysql/backup-tasks', data);
+export const updateDbBackupTask = (id, data) => request.patch(`/mysql/backup-tasks/${id}`, data);
+export const deleteDbBackupTask = (id) => request.delete(`/mysql/backup-tasks/${id}`);
+// 立即执行会同步等待 mysqldump 完成，大库需要放宽超时
+export const runDbBackupTask = (id) =>
+  request.post(`/mysql/backup-tasks/${id}/run`, {}, { timeout: 600000 });

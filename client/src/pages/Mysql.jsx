@@ -1,17 +1,21 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { getMysqlStatus, controlMysql, resetDbPassword, deleteMysqlDatabase } from '@/api/mysql';
+import {
+  getMysqlStatus, controlMysql, resetDbPassword, deleteMysqlDatabase,
+  getDbBackupTasks, updateDbBackupTask, deleteDbBackupTask, runDbBackupTask,
+} from '@/api/mysql';
 import GlassCard from '@/components/common/GlassCard';
 import LiquidButton from '@/components/common/LiquidButton';
 import StatusBadge from '@/components/common/StatusBadge';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
 import {
-  Play, Square, RefreshCw, Database, Plus, Package, Copy, KeyRound, Eye, EyeOff, Trash2,
+  Play, Square, RefreshCw, Database, Plus, Package, Copy, KeyRound, Eye, EyeOff, Trash2, Clock, Pencil,
 } from '@/components/common/Icons';
 import { useUIStore } from '@/components/common/uiStore';
 import CreateDatabaseModal from '@/components/mysql/CreateDatabaseModal';
 import DbBackupModal from '@/components/mysql/DbBackupModal';
+import DbBackupTaskModal from '@/components/mysql/DbBackupTaskModal';
 
 export default function Mysql() {
   const { t } = useTranslation();
@@ -29,11 +33,23 @@ export default function Mysql() {
   const [resetting, setResetting] = useState('');
   // 正在删除的库名
   const [deleting, setDeleting] = useState('');
+  // 定时备份任务
+  const [tasks, setTasks] = useState([]);
+  const [taskOpen, setTaskOpen] = useState(false);
+  const [editingTask, setEditingTask] = useState(null);
+  const [runningTask, setRunningTask] = useState(null);
+  const [togglingTask, setTogglingTask] = useState(null);
 
   async function fetchData() {
     try {
       const d = await getMysqlStatus();
       setData(d);
+    } catch (err) {
+      console.error(err);
+    }
+    try {
+      const result = await getDbBackupTasks();
+      setTasks(result.tasks || []);
     } catch (err) {
       console.error(err);
     }
@@ -112,6 +128,71 @@ export default function Mysql() {
       toast(err?.message || String(err), 'error');
     } finally {
       setDeleting('');
+    }
+  }
+
+  // 定时备份：频率文案、日期展示与三个操作
+  function taskFrequencyText(task) {
+    if (task.frequency === 'hourly') {
+      return t('mysql.freqHourly', { minute: String(task.minute ?? 0).padStart(2, '0') });
+    }
+    const time = `${String(task.hour ?? 0).padStart(2, '0')}:${String(task.minute ?? 0).padStart(2, '0')}`;
+    if (task.frequency === 'weekly') {
+      return t('mysql.freqWeekly', { weekday: t(`mysql.weekday${task.weekday}`), time });
+    }
+    return t('mysql.freqDaily', { time });
+  }
+
+  function formatDateTime(value) {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '-';
+    return date.toLocaleString(undefined, {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    });
+  }
+
+  async function handleRunTask(task) {
+    if (runningTask) return;
+    setRunningTask(task.id);
+    try {
+      const res = await runDbBackupTask(task.id);
+      toast(t('mysql.backupCreated', { file: res?.task?.lastFile || '' }), 'success');
+      await fetchData();
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+      await fetchData();
+    } finally {
+      setRunningTask(null);
+    }
+  }
+
+  async function handleToggleTask(task) {
+    if (togglingTask) return;
+    setTogglingTask(task.id);
+    try {
+      await updateDbBackupTask(task.id, { enabled: !task.enabled });
+      await fetchData();
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    } finally {
+      setTogglingTask(null);
+    }
+  }
+
+  async function handleDeleteTask(task) {
+    const ok = await uiConfirm({
+      title: t('common.delete'),
+      message: t('mysql.taskDeleteConfirm', { name: task.databaseName }),
+      confirmText: t('common.delete'),
+    });
+    if (!ok) return;
+    try {
+      await deleteDbBackupTask(task.id);
+      toast(t('mysql.taskDeleted'), 'success');
+      await fetchData();
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
     }
   }
 
@@ -254,12 +335,113 @@ export default function Mysql() {
         </div>
       </GlassCard>
 
+      {/* 定时备份任务：按计划自动导出，保留份数只作用于自动备份 */}
+      <GlassCard>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">{t('mysql.backupTasks')}</h2>
+            <p className="mt-1 text-xs text-white/50">{t('mysql.backupTasksHint')}</p>
+          </div>
+          <LiquidButton
+            onClick={() => { setEditingTask(null); setTaskOpen(true); }}
+            disabled={data.status !== 'active' || data.databases.length === 0}
+            className="!px-4 !py-1.5 !text-xs"
+          >
+            <Plus className="h-4 w-4" /> {t('mysql.newBackupTask')}
+          </LiquidButton>
+        </div>
+
+        {tasks.length === 0 ? (
+          <EmptyState message={t('mysql.noBackupTasks')} />
+        ) : (
+          <div className="space-y-2">
+            {tasks.map((task) => (
+              <div
+                key={task.id}
+                className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-3 transition-colors hover:bg-white/10 lg:flex-row lg:items-center"
+              >
+                <div className="flex min-w-0 flex-1 items-start gap-3">
+                  <div className={`mt-0.5 rounded-lg p-1.5 ${task.enabled ? 'bg-cyan-500/10 text-cyan-300' : 'bg-white/5 text-white/40'}`}>
+                    <Clock className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="truncate text-sm font-medium" title={task.databaseName}>{task.databaseName}</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] ${task.enabled ? 'bg-emerald-500/10 text-emerald-300' : 'bg-white/10 text-white/50'}`}>
+                        {task.enabled ? t('mysql.taskEnabled') : t('mysql.taskDisabled')}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-white/50">
+                      <span>{taskFrequencyText(task)}</span>
+                      <span>{t('mysql.backupTaskKeep')} {task.keepCount}</span>
+                      {task.enabled && task.nextRunAt && <span>{t('mysql.taskNextRun')} {formatDateTime(task.nextRunAt)}</span>}
+                      <span>
+                        {t('mysql.taskLastRun')} {task.lastRunAt ? formatDateTime(task.lastRunAt) : t('mysql.taskNeverRun')}
+                        {task.lastRunAt && (
+                          <span className={task.lastStatus === 'success' ? ' text-emerald-300' : ' text-rose-300'}>
+                            {task.lastStatus === 'success' ? ' ✓' : ' ✗'}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    {task.lastStatus === 'failed' && task.lastMessage && (
+                      <p className="mt-1 line-clamp-2 break-all text-[11px] text-rose-300" title={task.lastMessage}>{task.lastMessage}</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-none flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleRunTask(task)}
+                    disabled={runningTask === task.id}
+                    className="flex items-center gap-1 rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2.5 py-1 text-[11px] text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${runningTask === task.id ? 'animate-spin' : ''}`} />
+                    {runningTask === task.id ? t('mysql.taskRunning') : t('mysql.taskRunNow')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setEditingTask(task); setTaskOpen(true); }}
+                    className="flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2.5 py-1 text-[11px] text-white/70 transition-colors hover:bg-white/15 hover:text-white"
+                  >
+                    <Pencil className="h-3.5 w-3.5" /> {t('common.edit')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleToggleTask(task)}
+                    disabled={togglingTask === task.id}
+                    className="flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2.5 py-1 text-[11px] text-white/70 transition-colors hover:bg-white/15 hover:text-white disabled:opacity-50"
+                  >
+                    {task.enabled ? t('mysql.taskDisable') : t('mysql.taskEnable')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteTask(task)}
+                    className="flex items-center gap-1 rounded-full border border-rose-500/30 bg-rose-500/10 px-2.5 py-1 text-[11px] text-rose-300 transition-colors hover:bg-rose-500/20"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> {t('common.delete')}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </GlassCard>
+
       <CreateDatabaseModal
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreated={fetchData}
       />
       <DbBackupModal db={backupDb || null} onClose={() => setBackupDb('')} />
+      <DbBackupTaskModal
+        open={taskOpen}
+        onClose={() => { setTaskOpen(false); setEditingTask(null); }}
+        onSaved={fetchData}
+        databases={data.databases.map((db) => db.name)}
+        task={editingTask}
+      />
     </div>
   );
 }

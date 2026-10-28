@@ -6,8 +6,9 @@ const mysqlService = require('./mysqlService');
 // 备份文件统一落在面板数据目录下（data/ 已被 .gitignore 排除）
 const BACKUP_ROOT = path.join(__dirname, '../../data/mysql-backups');
 const DB_NAME_RE = /^[A-Za-z0-9_]+$/;
-// 全量：<库名>-<时间戳>.sql；仅结构：<库名>-<时间戳>-schema.sql（两者不能同名，否则会互相覆盖）
-const STAMP_RE = /^\d{8}-\d{6}(-schema)?\.sql$/;
+// 全量：<库名>-<时间戳>.sql；自动备份加 -auto；仅结构加 -schema；
+// 调度器的保留策略只清理带 -auto 的文件，不误删手动备份
+const STAMP_RE = /^\d{8}-\d{6}(-auto)?(-schema)?\.sql$/;
 // 系统库不允许备份/恢复，与列表过滤保持一致
 const SYSTEM_DBS = new Set(['mysql', 'information_schema', 'performance_schema', 'sys']);
 // 导出/导入耗时随库体积增长，放宽超时
@@ -56,7 +57,7 @@ async function assertDatabaseExists(dbName) {
   if (!list.includes(dbName)) throw clientError('数据库不存在', 404);
 }
 
-async function createBackup(dbName, { schemaOnly = false } = {}) {
+async function createBackup(dbName, { schemaOnly = false, auto = false } = {}) {
   const key = assertDbName(dbName);
 
   const status = await mysqlService.getStatus();
@@ -64,7 +65,7 @@ async function createBackup(dbName, { schemaOnly = false } = {}) {
   await assertDatabaseExists(key);
 
   await fs.promises.mkdir(BACKUP_ROOT, { recursive: true });
-  const name = `${key}-${stamp()}${schemaOnly ? '-schema' : ''}.sql`;
+  const name = `${key}-${stamp()}${auto ? '-auto' : ''}${schemaOnly ? '-schema' : ''}.sql`;
   const dest = path.join(BACKUP_ROOT, name);
 
   // --result-file 让 mysqldump 直接把结果写盘，避免大库 dump 撑爆 Node 的 stdout 缓冲
@@ -116,6 +117,8 @@ async function listBackups(dbName) {
       createdAt: stat.mtime.toISOString(),
       // 仅结构备份恢复时会先删表再建空表，前端需要更强的覆盖提示
       schemaOnly: name.endsWith('-schema.sql'),
+      // 定时任务产生的备份，参与保留份数清理
+      isAuto: /-auto(-schema)?\.sql$/.test(name),
     });
   }
   items.sort((a, b) => b.file.localeCompare(a.file));

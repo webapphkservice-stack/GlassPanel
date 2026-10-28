@@ -4,6 +4,7 @@ const store = require('../models/store');
 const logger = require('../utils/logger');
 const bcrypt = require('bcryptjs');
 const jobService = require('../services/jobService');
+const mysqlBackupSchedule = require('../services/mysqlBackupScheduleService');
 
 // 首次启动自动创建管理员：若数据库中没有任何用户则创建。
 // 生产环境 config/default.js 已强制要求设置强密码，避免使用默认凭据。
@@ -33,8 +34,12 @@ ensureAdmin()
       logger.info(`Glass Panel server running at http://localhost:${config.port} [${config.nodeEnv}]`);
     });
 
+    // 数据库定时备份调度器：随服务启动，进程内每分钟检查一次
+    mysqlBackupSchedule.start();
+
     process.on('SIGTERM', () => {
       logger.info('SIGTERM received, shutting down gracefully');
+      mysqlBackupSchedule.stop();
       server.close(() => process.exit(0));
     });
   });

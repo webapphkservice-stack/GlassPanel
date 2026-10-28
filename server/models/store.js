@@ -64,6 +64,23 @@ function initTables() {
       key TEXT PRIMARY KEY,
       value TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS mysql_backup_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      databaseName TEXT NOT NULL,
+      frequency TEXT NOT NULL DEFAULT 'daily',
+      hour INTEGER NOT NULL DEFAULT 3,
+      minute INTEGER NOT NULL DEFAULT 0,
+      weekday INTEGER NOT NULL DEFAULT 1,
+      keepCount INTEGER NOT NULL DEFAULT 7,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      lastRunAt TEXT,
+      lastStatus TEXT,
+      lastMessage TEXT,
+      lastFile TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
   `);
 }
 initTables();
@@ -215,6 +232,59 @@ module.exports = {
   },
   deleteManagedDatabase(name) {
     return db.prepare('DELETE FROM mysql_databases WHERE name = ?').run(name);
+  },
+
+  // 数据库定时备份任务：频率 hourly/daily/weekly，保留份数只作用于自动备份
+  listBackupTasks() {
+    return db.prepare('SELECT * FROM mysql_backup_tasks ORDER BY id ASC').all();
+  },
+  getBackupTask(id) {
+    return db.prepare('SELECT * FROM mysql_backup_tasks WHERE id = ?').get(Number(id));
+  },
+  createBackupTask(task) {
+    const now = new Date().toISOString();
+    const info = db.prepare(`
+      INSERT INTO mysql_backup_tasks
+        (databaseName, frequency, hour, minute, weekday, keepCount, enabled, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      task.databaseName,
+      task.frequency,
+      task.hour,
+      task.minute,
+      task.weekday,
+      task.keepCount,
+      task.enabled ? 1 : 0,
+      now,
+      now
+    );
+    return db.prepare('SELECT * FROM mysql_backup_tasks WHERE id = ?').get(info.lastInsertRowid);
+  },
+  updateBackupTask(id, fields) {
+    const allowed = ['databaseName', 'frequency', 'hour', 'minute', 'weekday', 'keepCount', 'enabled'];
+    const sets = [];
+    const values = [];
+    for (const key of allowed) {
+      if (fields[key] === undefined) continue;
+      sets.push(`${key} = ?`);
+      values.push(key === 'enabled' ? (fields[key] ? 1 : 0) : fields[key]);
+    }
+    if (sets.length === 0) return db.prepare('SELECT * FROM mysql_backup_tasks WHERE id = ?').get(Number(id));
+    sets.push('updatedAt = ?');
+    values.push(new Date().toISOString(), Number(id));
+    db.prepare(`UPDATE mysql_backup_tasks SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+    return db.prepare('SELECT * FROM mysql_backup_tasks WHERE id = ?').get(Number(id));
+  },
+  deleteBackupTask(id) {
+    return db.prepare('DELETE FROM mysql_backup_tasks WHERE id = ?').run(Number(id));
+  },
+  // 调度器执行后记录结果：lastRunAt 同时作为下次执行的基准时间
+  markBackupTaskRun(id, { status, message = '', file = '' }) {
+    return db.prepare(`
+      UPDATE mysql_backup_tasks
+      SET lastRunAt = ?, lastStatus = ?, lastMessage = ?, lastFile = ?, updatedAt = ?
+      WHERE id = ?
+    `).run(new Date().toISOString(), status, String(message).slice(0, 500), file, new Date().toISOString(), Number(id));
   },
 
   // 面板设置：键值对存储，未设置的键由调用方使用默认值

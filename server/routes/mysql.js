@@ -1,6 +1,7 @@
 const express = require('express');
 const mysql = require('../services/mysqlService');
 const mysqlBackups = require('../services/mysqlBackupService');
+const mysqlBackupSchedule = require('../services/mysqlBackupScheduleService');
 const nginx = require('../services/nginxService');
 const store = require('../models/store');
 
@@ -175,6 +176,114 @@ router.delete('/databases/:name/backups', async (req, res, next) => {
     const result = await mysqlBackups.deleteBackup(req.params.name, String(req.query.file || ''));
     store.addLog(req.user.username, 'mysql_database_backup_delete', `${req.params.name}:${result.file}`);
     res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// —— 数据库定时备份任务：频率 hourly/daily/weekly，时间按服务器本地时区 ——
+const FREQUENCIES = ['hourly', 'daily', 'weekly'];
+
+function normalizeTaskInput(body = {}, { partial = false } = {}) {
+  const out = {};
+  const intInRange = (value, fallback, min, max) => {
+    const num = Number(value);
+    return Number.isInteger(num) && num >= min && num <= max ? num : fallback;
+  };
+
+  if (!partial || body.databaseName !== undefined) {
+    const name = String(body.databaseName || '').trim();
+    if (!/^[A-Za-z0-9_]+$/.test(name)) throw clientError('非法的数据库名称');
+    out.databaseName = name;
+  }
+  if (!partial || body.frequency !== undefined) {
+    const frequency = String(body.frequency || 'daily');
+    if (!FREQUENCIES.includes(frequency)) throw clientError('非法的执行频率');
+    out.frequency = frequency;
+  }
+  if (!partial || body.hour !== undefined) out.hour = intInRange(body.hour, 3, 0, 23);
+  if (!partial || body.minute !== undefined) out.minute = intInRange(body.minute, 0, 0, 59);
+  if (!partial || body.weekday !== undefined) out.weekday = intInRange(body.weekday, 1, 0, 6);
+  if (!partial || body.keepCount !== undefined) out.keepCount = intInRange(body.keepCount, 7, 1, 60);
+  if (body.enabled !== undefined) out.enabled = Boolean(body.enabled);
+  return out;
+}
+
+async function assertTaskDatabase(name) {
+  const databases = await mysql.listDatabases();
+  if (!databases.includes(name)) throw clientError(`数据库不存在：${name}`, 404);
+}
+
+function presentTask(task) {
+  if (!task) return null;
+  const next = mysqlBackupSchedule.computeNextRun(task);
+  return {
+    ...task,
+    enabled: Boolean(task.enabled),
+    nextRunAt: next ? next.toISOString() : null,
+  };
+}
+
+router.get('/backup-tasks', (req, res) => {
+  res.json({
+    tasks: store.listBackupTasks().map(presentTask),
+    serverTime: new Date().toISOString(),
+  });
+});
+
+router.post('/backup-tasks', async (req, res, next) => {
+  try {
+    const input = normalizeTaskInput(req.body);
+    await assertTaskDatabase(input.databaseName);
+    const task = store.createBackupTask({ ...input, enabled: input.enabled !== false });
+    store.addLog(req.user.username, 'mysql_backup_task_create', `${input.databaseName}:${input.frequency}`);
+    res.json({ success: true, task: presentTask(task) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch('/backup-tasks/:id', async (req, res, next) => {
+  try {
+    const existing = store.getBackupTask(req.params.id);
+    if (!existing) throw clientError('备份任务不存在', 404);
+    const input = normalizeTaskInput(req.body, { partial: true });
+    if (input.databaseName && input.databaseName !== existing.databaseName) {
+      await assertTaskDatabase(input.databaseName);
+    }
+    const task = store.updateBackupTask(existing.id, input);
+    store.addLog(req.user.username, 'mysql_backup_task_update', `${task.databaseName}:${task.frequency}`);
+    res.json({ success: true, task: presentTask(task) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete('/backup-tasks/:id', (req, res, next) => {
+  try {
+    const existing = store.getBackupTask(req.params.id);
+    if (!existing) throw clientError('备份任务不存在', 404);
+    store.deleteBackupTask(existing.id);
+    store.addLog(req.user.username, 'mysql_backup_task_delete', existing.databaseName);
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 立即执行：大库导出耗时较长，前端已放宽超时
+router.post('/backup-tasks/:id/run', async (req, res, next) => {
+  try {
+    const existing = store.getBackupTask(req.params.id);
+    if (!existing) throw clientError('备份任务不存在', 404);
+    if (mysqlBackupSchedule.isRunning(existing.id)) throw clientError('任务正在执行中，请稍后再试', 409);
+    try {
+      await mysqlBackupSchedule.runTask(existing);
+    } catch (err) {
+      throw clientError(err.message || '备份失败', 500);
+    }
+    store.addLog(req.user.username, 'mysql_backup_task_run', existing.databaseName);
+    res.json({ success: true, task: presentTask(store.getBackupTask(existing.id)) });
   } catch (err) {
     next(err);
   }
