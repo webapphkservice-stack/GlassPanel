@@ -197,6 +197,9 @@ export default function SiteFileBrowser({ site, onClose }) {
 
   const segments = dir ? dir.split('/') : [];
   const locale = i18n.language;
+  // 文件管理以网站根目录为界：siteDir 是站点目录，root 通常只是其中的运行目录（如 public）
+  const siteRoot = site?.siteDir || site?.root || '';
+  const runDir = site?.root || '';
 
   return (
     <GlassModal
@@ -204,7 +207,7 @@ export default function SiteFileBrowser({ site, onClose }) {
       onClose={onClose}
       maxWidth="max-w-3xl"
       title={t('nginx.files.title', { name: site?.serverName || site?.name || '' })}
-      subtitle={`${t('nginx.files.subtitle')}：${site?.root || ''}`}
+      subtitle={`${t('nginx.files.subtitle')}：${siteRoot}${runDir && runDir !== siteRoot ? `（${t('nginx.runDirLabel')}：${runDir}）` : ''}`}
     >
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -217,7 +220,7 @@ export default function SiteFileBrowser({ site, onClose }) {
               className="flex items-center gap-1 rounded-lg px-2 py-1 text-cyan-300 hover:bg-white/10 disabled:cursor-default disabled:text-white/40 disabled:hover:bg-transparent"
             >
               <Home className="w-4 h-4" />
-              <span className="max-w-[180px] truncate">{site?.root || '/'}</span>
+              <span className="max-w-[180px] truncate">{siteRoot || '/'}</span>
             </button>
             {segments.map((seg, idx) => {
               const target = segments.slice(0, idx + 1).join('/');

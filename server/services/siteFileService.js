@@ -5,7 +5,8 @@ const { pipeline } = require('stream/promises');
 const { listSites } = require('./nginxService');
 const { run } = require('./commandRunner');
 
-const SITE_NAME_RE = /^[A-Za-z0-9._-]+$/;
+// 站点名称：与 nginxService 保持一致，允许中文、字母、数字、点、下划线与短横线
+const SITE_NAME_RE = /^[\p{L}\p{N}_-][\p{L}\p{N}._-]*$/u;
 // 上传单文件大小上限，与路由上 express.raw 的 limit 保持一致
 const MAX_UPLOAD_SIZE = 500 * 1024 * 1024;
 
@@ -37,21 +38,25 @@ function clientError(message, status = 400) {
   return err;
 }
 
-// 站点名 -> 网站根目录（realpath），文件操作全部以该目录为界
+// 站点名 -> 网站根目录（realpath），文件操作全部以该目录为界。
+// 网站根目录取用户建站时填写的站点目录（site.siteDir），而不是 nginx root：
+// root 往往只是站点目录下的运行目录（如 public），只开放它会导致无法管理站点根目录本身
 async function getSiteRoot(siteName) {
   const key = String(siteName || '').trim();
   if (!SITE_NAME_RE.test(key)) throw clientError('非法站点名称');
   const site = (await listSites()).find((item) => item.name === key);
   if (!site) throw clientError('站点不存在', 404);
-  if (!site.root) throw clientError('该站点未配置 root（可能为纯反向代理站点），无法管理文件');
+  const siteRoot = String(site.siteDir || site.root || '').trim();
+  const runDir = String(site.root || '').trim();
+  if (!siteRoot) throw clientError('该站点未配置 root（可能为纯反向代理站点），无法管理文件');
   let rootReal;
   try {
-    rootReal = await fs.promises.realpath(site.root);
+    rootReal = await fs.promises.realpath(siteRoot);
   } catch (err) {
-    if (err.code === 'ENOENT') throw clientError(`站点根目录不存在：${site.root}`, 404);
+    if (err.code === 'ENOENT') throw clientError(`站点根目录不存在：${siteRoot}`, 404);
     throw err;
   }
-  return { name: key, root: site.root, rootReal };
+  return { name: key, root: siteRoot, rootReal, runDir };
 }
 
 // 相对路径规范化：拒绝绝对路径、.. 与空段
