@@ -30,6 +30,16 @@
   --accent-950: 8 51 68;
 
   --primary: rgb(var(--accent-400));
+
+  /* 玻璃表面：暗/亮两种模式共用，由 data-mode 切换取值 */
+  --glass-surface-a: rgba(255, 255, 255, 0.09);
+  --glass-surface-b: rgba(255, 255, 255, 0.04);
+  --glass-surface-a-hover: rgba(255, 255, 255, 0.13);
+  --glass-surface-b-hover: rgba(255, 255, 255, 0.06);
+  --modal-shell-a: rgba(255, 255, 255, 0.12);
+  --modal-shell-b: rgba(255, 255, 255, 0.06);
+  --modal-shell-c: rgba(255, 255, 255, 0.09);
+  --modal-body-bg: rgba(15, 23, 42, 0.7);
 }
 
 * {
@@ -144,4 +154,156 @@ input::placeholder {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ============================ 亮色主题 ============================
+   面板组件大量使用白色透明度工具类（text-white/60、bg-white/5 等），
+   这里统一在 data-mode="light" 下重新映射为深色系，避免逐个组件改写。 */
+.glass-surface {
+  background-image: linear-gradient(180deg, var(--glass-surface-a), var(--glass-surface-b));
+}
+.glass-surface-hover:hover {
+  background-image: linear-gradient(180deg, var(--glass-surface-a-hover), var(--glass-surface-b-hover));
+}
+.glass-modal-shell {
+  background-image: linear-gradient(180deg, var(--modal-shell-a), var(--modal-shell-b) 55%, var(--modal-shell-c));
+}
+.glass-modal-body {
+  background-color: var(--modal-body-bg);
+}
+
+html[data-mode="light"] {
+  color-scheme: light;
+  --glass-surface-a: rgba(255, 255, 255, 0.9);
+  --glass-surface-b: rgba(255, 255, 255, 0.62);
+  --glass-surface-a-hover: rgba(255, 255, 255, 0.98);
+  --glass-surface-b-hover: rgba(255, 255, 255, 0.78);
+  --modal-shell-a: rgba(255, 255, 255, 0.95);
+  --modal-shell-b: rgba(255, 255, 255, 0.86);
+  --modal-shell-c: rgba(255, 255, 255, 0.92);
+  --modal-body-bg: rgba(255, 255, 255, 0.92);
+}
+
+html[data-mode="light"] body {
+  background-color: #eef2f8;
+  background-image:
+    radial-gradient(ellipse 80% 60% at 70% -10%, rgb(var(--accent-300) / 0.3), transparent 60%),
+    radial-gradient(ellipse 60% 50% at 10% 110%, rgb(var(--accent-200) / 0.4), transparent 65%),
+    linear-gradient(180deg, #f8fafc 0%, #eef2f8 45%, #e6ecf5 100%);
+  color: #0f172a;
+}
+
+html[data-mode="light"] body::before { opacity: 0.18; }
+html[data-mode="light"] body::after { opacity: 0.14; }
+
+/* 滚动条与输入占位符 */
+html[data-mode="light"] ::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.18);
+  border-color: rgba(15, 23, 42, 0.06);
+}
+html[data-mode="light"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.28);
+}
+html[data-mode="light"] input::placeholder,
+html[data-mode="light"] textarea::placeholder {
+  color: rgba(15, 23, 42, 0.35);
+}
+
+/* 文本层级：白色透明度 → 深色透明度 */
+html[data-mode="light"] [class~="text-white/30"],
+html[data-mode="light"] [class~="text-white/35"],
+html[data-mode="light"] [class~="text-white/40"],
+html[data-mode="light"] [class~="text-white/45"] {
+  color: rgba(15, 23, 42, 0.5);
+}
+html[data-mode="light"] [class~="text-white/50"],
+html[data-mode="light"] [class~="text-white/55"] {
+  color: rgba(15, 23, 42, 0.58);
+}
+html[data-mode="light"] [class~="text-white/60"] { color: rgba(15, 23, 42, 0.64); }
+html[data-mode="light"] [class~="text-white/70"],
+html[data-mode="light"] [class~="text-white/80"],
+html[data-mode="light"] [class~="text-white/85"] {
+  color: rgba(15, 23, 42, 0.72);
+}
+html[data-mode="light"] [class~="text-white/90"] { color: rgba(15, 23, 42, 0.85); }
+
+/* 悬停类：独立覆盖，保证 hover 时颜色仍然加深 */
+html[data-mode="light"] [class*="hover:text-white"]:hover { color: rgba(15, 23, 42, 0.9); }
+
+/* 表单内直接写了 text-white 的输入框 */
+html[data-mode="light"] input[class~="text-white"],
+html[data-mode="light"] textarea[class~="text-white"],
+html[data-mode="light"] select[class~="text-white"] {
+  color: #0f172a;
+}
+
+/* 表面：白色透明度 → 深色透明度 */
+html[data-mode="light"] [class~="bg-white/5"],
+html[data-mode="light"] [class~="bg-white/[0.03]"],
+html[data-mode="light"] [class~="bg-white/[0.04]"],
+html[data-mode="light"] [class~="bg-white/[0.06]"],
+html[data-mode="light"] [class~="bg-white/[0.07]"] {
+  background-color: rgba(15, 23, 42, 0.045);
+}
+html[data-mode="light"] [class~="bg-white/10"] { background-color: rgba(15, 23, 42, 0.07); }
+html[data-mode="light"] [class~="bg-white/15"] { background-color: rgba(15, 23, 42, 0.09); }
+html[data-mode="light"] [class~="bg-white/50"] { background-color: rgba(15, 23, 42, 0.3); }
+
+html[data-mode="light"] [class*="hover:bg-white"]:hover { background-color: rgba(15, 23, 42, 0.07); }
+
+/* 边框 */
+html[data-mode="light"] [class~="border-white/5"] { border-color: rgba(15, 23, 42, 0.08); }
+html[data-mode="light"] [class~="border-white/10"] { border-color: rgba(15, 23, 42, 0.12); }
+html[data-mode="light"] [class~="border-white/15"] { border-color: rgba(15, 23, 42, 0.14); }
+html[data-mode="light"] [class~="border-white/20"],
+html[data-mode="light"] [class~="border-white/25"],
+html[data-mode="light"] [class~="border-white/[0.2]"] {
+  border-color: rgba(15, 23, 42, 0.2);
+}
+html[data-mode="light"] [class~="border-white/[0.12]"] { border-color: rgba(15, 23, 42, 0.14); }
+html[data-mode="light"] [class*="hover:border-white"]:hover { border-color: rgba(15, 23, 42, 0.3); }
+
+/* 深色实体表面：顶栏/侧栏、下拉菜单、弹窗、表头、原生选项 */
+html[data-mode="light"] header[class*="bg-[rgba(15,21,38"] { background-color: rgba(255, 255, 255, 0.72); }
+html[data-mode="light"] aside[class*="bg-[rgba(15,21,38"] { background-color: rgba(255, 255, 255, 0.78); }
+html[data-mode="light"] [class*="bg-gray-900/"],
+html[data-mode="light"] [class*="bg-gray-950/"] {
+  background-color: rgba(255, 255, 255, 0.92);
+}
+html[data-mode="light"] option[class~="bg-gray-900"],
+html[data-mode="light"] option[class~="bg-slate-900"] {
+  background-color: #ffffff;
+  color: #0f172a;
+}
+
+/* 彩色文字：亮色背景上加深，保持可读性 */
+html[data-mode="light"] [class~="text-cyan-300"] { color: rgb(var(--accent-600)); }
+html[data-mode="light"] [class~="text-cyan-200"] { color: rgb(var(--accent-700)); }
+html[data-mode="light"] [class~="text-cyan-100"] { color: rgb(var(--accent-700)); }
+
+/* 侧边栏/标签页的选中项：浅色下强调底色变浅，白字改为深色 */
+html[data-mode="light"] [class~="text-white"][class~="from-cyan-500/25"] { color: rgb(var(--accent-800)); }
+html[data-mode="light"] [class~="text-emerald-300"] { color: #059669; }
+html[data-mode="light"] [class~="text-amber-300"] { color: #b45309; }
+html[data-mode="light"] [class~="text-rose-300"] { color: #e11d48; }
+html[data-mode="light"] [class~="text-orange-300"] { color: #ea580c; }
+html[data-mode="light"] [class~="text-indigo-300"] { color: #4f46e5; }
+
+/* 深色终端/日志块里的浅色文字不参与上面的反转 */
+html[data-mode="light"] [class~="bg-black/30"][class~="text-white/70"],
+html[data-mode="light"] [class~="bg-black/60"][class~="text-white/70"] {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* 玻璃卡片与弹窗阴影在亮色下需要更柔和 */
+html[data-mode="light"] .shadow-glass {
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06), 0 24px 48px -16px rgba(15, 23, 42, 0.12);
+}
+
+/* ghost 按钮在亮色下改为浅灰底 + 深色文字 */
+html[data-mode="light"] .liquid-btn-ghost {
+  color: #0f172a;
+  border-color: rgba(15, 23, 42, 0.14);
+  background-image: linear-gradient(180deg, rgba(15, 23, 42, 0.06), rgba(15, 23, 42, 0.025));
 }

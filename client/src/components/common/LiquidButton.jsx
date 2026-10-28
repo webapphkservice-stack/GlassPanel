@@ -35,6 +35,7 @@ export default function LiquidButton({
         hover:brightness-110 active:scale-[0.97] disabled:opacity-50
         disabled:cursor-not-allowed disabled:hover:brightness-100
         bg-gradient-to-b ${variants[variant]}
+        ${variant === 'ghost' ? 'liquid-btn-ghost' : ''}
         ${className}
       `}
     >

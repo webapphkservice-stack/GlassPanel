@@ -32,6 +32,7 @@ import SiteBackupModal from '@/components/site/SiteBackupModal';
 import ProvisionFlowModal from '@/components/site/ProvisionFlowModal';
 import { Play, Square, RefreshCw, FileText, Globe, Check, Plus } from '@/components/common/Icons';
 import { useUIStore } from '@/components/common/uiStore';
+import { useThemeStore } from '@/store';
 
 // 站点配置目录（RHEL 系 nginx 通过 conf.d/*.conf 引入）
 const SITE_DIR = '/etc/nginx/conf.d';
@@ -91,6 +92,8 @@ export default function Nginx() {
   const toast = useUIStore((s) => s.toast);
   const uiConfirm = useUIStore((s) => s.confirm);
   const [status, setStatus] = useState('unknown');
+  // 编辑器主题跟随外观模式
+  const mode = useThemeStore((s) => s.mode);
   const [sites, setSites] = useState([]);
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
@@ -957,7 +960,7 @@ export default function Nginx() {
             defaultLanguage="nginx"
             value={editorContent}
             onChange={(v) => setEditorContent(v || '')}
-            theme="vs-dark"
+            theme={mode === 'light' ? 'light' : 'vs-dark'}
             options={{ minimap: { enabled: false }, fontSize: 14 }}
           />
         </div>

@@ -21,7 +21,7 @@ export function ToastContainer() {
         return (
           <div
             key={t.id}
-            className="animate-[toastIn_0.25s_cubic-bezier(0.16,1,0.3,1)] overflow-hidden rounded-2xl border border-white/[0.12] bg-gradient-to-b from-white/[0.12] via-white/[0.06] to-white/[0.09] shadow-glass backdrop-blur-2xl backdrop-saturate-150"
+            className="glass-modal-shell animate-[toastIn_0.25s_cubic-bezier(0.16,1,0.3,1)] overflow-hidden rounded-2xl border border-white/[0.12] bg-gradient-to-b from-white/[0.12] via-white/[0.06] to-white/[0.09] shadow-glass backdrop-blur-2xl backdrop-saturate-150"
           >
             <div className="flex items-center gap-3 rounded-[calc(1rem-1px)] bg-gray-950/70 px-4 py-3 backdrop-blur-2xl backdrop-saturate-150">
               <div className={`rounded-lg bg-white/5 p-1.5 ${tv.cls}`}>
@@ -48,7 +48,7 @@ export function ConfirmDialog() {
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/40 backdrop-blur-md animate-[fadeIn_0.2s_ease]" onClick={() => resolve(false)} />
-      <div className="relative z-10 w-full max-w-md overflow-hidden rounded-3xl border border-white/[0.12] bg-gradient-to-b from-white/[0.12] via-white/[0.06] to-white/[0.09] shadow-glass backdrop-blur-2xl backdrop-saturate-150 animate-[scaleIn_0.22s_cubic-bezier(0.16,1,0.3,1)]">
+      <div className="glass-modal-shell relative z-10 w-full max-w-md overflow-hidden rounded-3xl border border-white/[0.12] bg-gradient-to-b from-white/[0.12] via-white/[0.06] to-white/[0.09] shadow-glass backdrop-blur-2xl backdrop-saturate-150 animate-[scaleIn_0.22s_cubic-bezier(0.16,1,0.3,1)]">
         <div className="pointer-events-none absolute inset-x-10 top-0 h-px bg-gradient-to-r from-transparent via-white/60 to-transparent" />
         <div className="relative rounded-[calc(1.5rem-1px)] bg-gray-950/75 px-6 py-6 backdrop-blur-2xl backdrop-saturate-150">
           <div className="flex items-start gap-4">

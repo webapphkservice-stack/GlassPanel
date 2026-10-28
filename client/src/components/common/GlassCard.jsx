@@ -4,10 +4,9 @@ export default function GlassCard({ children, className = '', hover = true }) {
   return (
     <div
       className={`
-        relative rounded-2xl border border-white/[0.12] shadow-glass
-        bg-gradient-to-b from-white/[0.09] to-white/[0.04]
+        relative rounded-2xl border border-white/[0.12] shadow-glass glass-surface
         backdrop-blur-glass backdrop-saturate-150 p-6 transition-all duration-300
-        ${hover ? 'hover:border-white/[0.2] hover:from-white/[0.13] hover:to-white/[0.06] hover:-translate-y-1' : ''}
+        ${hover ? 'glass-surface-hover hover:border-white/[0.2] hover:-translate-y-1' : ''}
         ${className}
       `}
     >

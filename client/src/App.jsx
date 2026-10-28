@@ -43,7 +43,7 @@ function VersionWatcher() {
   if (!newVersion) return null;
 
   return (
-    <div className="fixed bottom-6 right-6 z-[100] animate-[toastIn_0.25s_ease] rounded-2xl border border-white/[0.12] bg-gradient-to-b from-white/[0.12] via-white/[0.06] to-white/[0.09] p-px shadow-glass backdrop-blur-2xl backdrop-saturate-150">
+    <div className="glass-modal-shell fixed bottom-6 right-6 z-[100] animate-[toastIn_0.25s_ease] rounded-2xl border border-white/[0.12] bg-gradient-to-b from-white/[0.12] via-white/[0.06] to-white/[0.09] p-px shadow-glass backdrop-blur-2xl backdrop-saturate-150">
       <div className="flex items-center gap-3 rounded-[calc(1rem-1px)] bg-gray-950/75 px-5 py-4">
         <span className="text-sm text-white/85">{t('common.newVersionAvailable')}</span>
         <button

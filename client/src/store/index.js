@@ -80,6 +80,8 @@ export const THEMES = [
 ];
 
 const THEME_KEY = 'panel_theme_id';
+// 外观模式：dark / light，与强调色分开保存
+const MODE_KEY = 'panel_color_mode';
 
 // 每个色阶的固定亮度（贴近 Tailwind cyan 的明暗梯度，保证暗色背景上的可读性）
 const SHADE_LIGHTNESS = {
@@ -150,8 +152,22 @@ function readStoredTheme() {
   }
 }
 
+// 外观模式写入 data-mode，样式层据此切换亮/暗色
+export function applyMode(mode) {
+  document.documentElement.dataset.mode = mode === 'light' ? 'light' : 'dark';
+}
+
+function readStoredMode() {
+  try {
+    return localStorage.getItem(MODE_KEY) === 'light' ? 'light' : 'dark';
+  } catch (e) {
+    return 'dark';
+  }
+}
+
 export const useThemeStore = create((set) => ({
   themeId: readStoredTheme(),
+  mode: readStoredMode(),
   setTheme: (id) => {
     applyTheme(id);
     try {
@@ -161,9 +177,19 @@ export const useThemeStore = create((set) => ({
     }
     set({ themeId: id });
   },
+  setMode: (mode) => {
+    applyMode(mode);
+    try {
+      localStorage.setItem(MODE_KEY, mode);
+    } catch (e) {
+      // 同上，写入失败不影响本次切换
+    }
+    set({ mode });
+  },
 }));
 
 // 首屏渲染前应用已保存的主题，避免闪一下默认色
 export function initTheme() {
   applyTheme(readStoredTheme());
+  applyMode(readStoredMode());
 }

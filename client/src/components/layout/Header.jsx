@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore, useUIStore as useSidebarUI, THEMES, useThemeStore } from '@/store';
 import { useUIStore } from '@/components/common/uiStore';
-import { Bell, Menu, RefreshCw, Palette, Check, Shield, Globe, Trash2 } from '@/components/common/Icons';
+import { Bell, Menu, RefreshCw, Palette, Check, Shield, Globe, Trash2, Sun, Moon } from '@/components/common/Icons';
 import GlassModal from '@/components/common/GlassModal';
 import CleanupModal from '@/components/common/CleanupModal';
 import { restartPanel } from '@/api/system';
@@ -21,7 +21,7 @@ export default function Header({ title }) {
   const { user } = useAuthStore();
   const toast = useUIStore((s) => s.toast);
   const uiConfirm = useUIStore((s) => s.confirm);
-  const { themeId, setTheme } = useThemeStore();
+  const { themeId, setTheme, mode, setMode } = useThemeStore();
   const navigate = useNavigate();
   const [restarting, setRestarting] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
@@ -57,6 +57,11 @@ export default function Header({ title }) {
   function handlePickTheme(theme) {
     setTheme(theme.id);
     toast(t('header.themeSwitched', { name: t(`theme.${theme.id}`) }), 'success');
+  }
+
+  function handlePickMode(next) {
+    setMode(next);
+    toast(t('header.modeSwitched', { name: t(next === 'light' ? 'header.modeLight' : 'header.modeDark') }), 'success');
   }
 
   function changeLang(code) {
@@ -155,6 +160,34 @@ export default function Header({ title }) {
         open={themeOpen}
         onClose={() => setThemeOpen(false)}
       >
+        {/* 外观模式：深色 / 亮色 */}
+        <div className="mb-5">
+          <p className="mb-2 text-sm text-white/70">{t('header.appearanceMode')}</p>
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { id: 'dark', Icon: Moon, label: t('header.modeDark') },
+              { id: 'light', Icon: Sun, label: t('header.modeLight') },
+            ].map(({ id, Icon, label }) => {
+              const active = mode === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => handlePickMode(id)}
+                  className={`flex items-center justify-center gap-2 rounded-xl border px-4 py-3 text-sm font-medium transition-colors ${
+                    active
+                      ? 'border-cyan-400/50 bg-cyan-500/10 text-cyan-300'
+                      : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10'
+                  }`}
+                >
+                  <Icon className="w-4 h-4" /> {label}
+                  {active && <Check className="w-4 h-4" />}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {THEMES.map((theme) => {
             const active = theme.id === themeId;
