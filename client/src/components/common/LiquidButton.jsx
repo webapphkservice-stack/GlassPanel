@@ -5,9 +5,15 @@ export default function LiquidButton({
   onClick,
   type = 'button',
   variant = 'primary',
+  size = 'md',
   className = '',
   disabled = false,
 }) {
+  // 尺寸：卡片内的操作按钮用 sm，避免多个按钮并排时文字被挤成多行
+  const sizes = {
+    md: 'px-6 py-2.5',
+    sm: 'px-3 py-1.5 text-xs',
+  };
   const variants = {
     primary:
       'from-cyan-400/90 to-cyan-500/70 border-cyan-300/40 shadow-[0_8px_24px_rgba(34,211,238,0.25)]',
@@ -24,7 +30,7 @@ export default function LiquidButton({
       onClick={onClick}
       disabled={disabled}
       className={`
-        group relative overflow-hidden rounded-full border px-6 py-2.5 font-medium
+        group relative overflow-hidden rounded-full border ${sizes[size] || sizes.md} font-medium
         text-white backdrop-blur-xl transition-all duration-300
         hover:brightness-110 active:scale-[0.97] disabled:opacity-50
         disabled:cursor-not-allowed disabled:hover:brightness-100
@@ -45,7 +51,7 @@ export default function LiquidButton({
           }}
         />
       )}
-      <span className="relative z-10 flex items-center justify-center gap-2">{children}</span>
+      <span className="relative z-10 flex items-center justify-center gap-2 whitespace-nowrap">{children}</span>
     </button>
   );
 }

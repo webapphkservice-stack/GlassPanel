@@ -359,7 +359,7 @@ export default function Apps() {
                   </div>
                 )}
               </div>
-              <div className="mt-4 flex gap-2">
+              <div className="mt-4 flex flex-wrap gap-2">
                 {busy ? (
                   <div className="flex-1">
                     <LiquidButton onClick={() => openJob(app.key)} variant="ghost" className="w-full justify-center">
@@ -373,8 +373,8 @@ export default function Apps() {
                 ) : app.installed ? (
                   <>
                     {app.page && (
-                      <a href={app.page} className="flex-1">
-                        <LiquidButton variant="ghost" className="w-full justify-center"><Package className="w-4 h-4" /> {t('common.manage')}</LiquidButton>
+                      <a href={app.page} className="flex flex-1 basis-[calc(50%-0.25rem)]">
+                        <LiquidButton size="sm" variant="ghost" className="w-full justify-center"><Package className="w-4 h-4" /> {t('common.manage')}</LiquidButton>
                       </a>
                     )}
                     {app.openUrl && (
@@ -382,23 +382,23 @@ export default function Apps() {
                         href={app.openUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex-1"
+                        className="flex flex-1 basis-[calc(50%-0.25rem)]"
                       >
-                        <LiquidButton variant="ghost" className="w-full justify-center">
+                        <LiquidButton size="sm" variant="ghost" className="w-full justify-center">
                           <ExternalLink className="w-4 h-4" /> {t('apps.openPanel')}
                         </LiquidButton>
                       </a>
                     )}
                     {app.updateAvailable && app.canManage !== false && (
-                      <div className="flex-1">
-                        <LiquidButton onClick={() => handleUpdate(app)} disabled={!!startingKey} className="w-full justify-center">
+                      <div className="flex-1 basis-[calc(50%-0.25rem)]">
+                        <LiquidButton size="sm" onClick={() => handleUpdate(app)} disabled={!!startingKey} className="w-full justify-center">
                           <RefreshCw className="w-4 h-4" /> {t('common.update')}
                         </LiquidButton>
                       </div>
                     )}
                     {app.canManage !== false && (
-                      <div className="flex-1">
-                        <LiquidButton onClick={() => handleUninstall(app.key, app.name)} disabled={!!startingKey} variant="danger" className="w-full justify-center">
+                      <div className="flex-1 basis-[calc(50%-0.25rem)]">
+                        <LiquidButton size="sm" onClick={() => handleUninstall(app.key, app.name)} disabled={!!startingKey} variant="danger" className="w-full justify-center">
                           <Trash className="w-4 h-4" /> {t('common.uninstall')}
                         </LiquidButton>
                       </div>
