@@ -234,6 +234,8 @@
   "nginx": {
     "status": "Nginx 狀態",
     "testConfig": "測試設定",
+    "controlPending": "指令已下發，正在執行…",
+    "controlFailed": "操作失敗",
     "configTestPass": "設定測試通過",
     "configTestFail": "設定測試失敗：{error}",
     "sites": "站台列表",

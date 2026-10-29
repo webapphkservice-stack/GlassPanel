@@ -242,6 +242,8 @@
   "nginx": {
     "status": "Nginx Status",
     "testConfig": "Test Config",
+    "controlPending": "Command submitted, applying…",
+    "controlFailed": "Operation failed",
     "configTestPass": "Configuration test passed",
     "configTestFail": "Configuration test failed: {error}",
     "sites": "Site List",

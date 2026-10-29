@@ -249,8 +249,19 @@ export default function Nginx() {
   async function handleControl(action) {
     setLoading(true);
     try {
-      await controlNginx(action);
-      await fetchStatus();
+      const res = await controlNginx(action);
+      // 启停/重启由后端延迟执行（面板可能经本机 nginx 反代，立即执行会切断请求），
+      // 稍后再刷新状态即可看到结果
+      if (res?.pending) {
+        toast(t('nginx.controlPending'), 'info');
+        setTimeout(() => { fetchStatus(); }, 1500);
+      } else {
+        if (res && res.success === false) {
+          const detail = res.output?.stderr || res.output?.stdout || '';
+          toast(`${t('nginx.controlFailed')}${detail ? `：${detail.trim().slice(0, 200)}` : ''}`, 'error');
+        }
+        await fetchStatus();
+      }
     } catch (err) {
       toast(err?.message || String(err), 'error');
     } finally {

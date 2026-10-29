@@ -22,9 +22,36 @@ router.get('/status', async (req, res, next) => {
   }
 });
 
+// 面板自身可能由本机 nginx 反向代理：重启/停止会立刻切断当前请求，
+// 浏览器只会看到 Network Error，因此先返回响应再延迟执行动作
+const DELAYED_ACTIONS = new Set(['start', 'stop', 'restart']);
+let lastDelayedControl = { action: '', at: 0 };
+
 router.post('/control/:action', async (req, res, next) => {
   try {
     const { action } = req.params;
+    if (DELAYED_ACTIONS.has(action)) {
+      const now = Date.now();
+      // 2 秒内的重复点击不重复执行，避免界面连点引发连续重启
+      if (lastDelayedControl.action === action && now - lastDelayedControl.at < 2000) {
+        return res.json({ success: true, pending: true, deduped: true });
+      }
+      lastDelayedControl = { action, at: now };
+      const { username } = req.user;
+      res.json({ success: true, pending: true });
+      setTimeout(async () => {
+        try {
+          const result = await nginx.control(action);
+          store.addLog(username, `nginx_${action}`, result.stderr || result.stdout);
+          if (result.exitCode !== 0) {
+            logger.error('Nginx control failed after response', { action, exitCode: result.exitCode });
+          }
+        } catch (err) {
+          logger.error('Nginx control failed after response', { action, error: err.message });
+        }
+      }, 600);
+      return;
+    }
     const result = await nginx.control(action);
     store.addLog(req.user.username, `nginx_${action}`, result.stderr || result.stdout);
     res.json({ success: result.exitCode === 0, output: result });
