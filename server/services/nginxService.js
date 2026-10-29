@@ -110,10 +110,44 @@ async function getStatus() {
   return result.exitCode === 0 ? result.stdout.trim() : 'inactive';
 }
 
+// 停止没有被 systemd 托管的 nginx master（历史上手工启动过 nginx 时会出现）：
+// 这类进程不在 unit 的 cgroup 里，systemctl restart 无法结束它，新 master 会因
+// 80/443 被占用而启动失败，unit 变成 failed 但旧进程仍在服务
+async function stopUntrackedMasters() {
+  const unit = await run('systemctl', ['show', servicesConfig.service, '-p', 'MainPID']);
+  const mainPid = Number(String(unit.stdout || '').replace(/[^\d]/g, '')) || 0;
+  const ps = await run('ps', ['-eo', 'pid=,args=']);
+  const pids = (ps.stdout || '')
+    .split('\n')
+    .map((line) => line.trim().match(/^(\d+)\s+nginx: master process/))
+    .filter(Boolean)
+    .map((m) => Number(m[1]))
+    .filter((pid) => pid && pid !== mainPid);
+  if (!pids.length) return false;
+  const signal = (sig) => run('bash', ['-c', `kill -${sig} ${pids.join(' ')} 2>/dev/null || true`]);
+  await signal('QUIT');
+  // 优雅退出最多等 5 秒，仍未退出则强制结束
+  for (let i = 0; i < 10; i += 1) {
+    const alive = await run('ps', ['-p', pids.join(','), '-o', 'pid=']);
+    if (!String(alive.stdout || '').trim()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  await signal('TERM');
+  return true;
+}
+
 async function control(action) {
   const allowed = ['start', 'stop', 'restart', 'reload'];
   if (!allowed.includes(action)) throw new Error('非法操作');
-  return run('systemctl', [action, servicesConfig.service]);
+  let result = await run('systemctl', [action, servicesConfig.service]);
+  // start/restart 因端口被占失败时，结束遗留的非托管 master 后重试一次
+  if (result.exitCode !== 0 && (action === 'start' || action === 'restart')) {
+    const output = `${result.stderr || ''}${result.stdout || ''}`;
+    if (/Address already in use|still could not bind/i.test(output) && (await stopUntrackedMasters())) {
+      result = await run('systemctl', [action, servicesConfig.service]);
+    }
+  }
+  return result;
 }
 
 async function testConfig() {

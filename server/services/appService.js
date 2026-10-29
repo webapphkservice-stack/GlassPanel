@@ -989,21 +989,89 @@ UNIT_PATH="${unitPath}"
 BACKUP_UNIT="${backupUnit}"
 SERVICE_WAS_ACTIVE=0
 SERVICE_STOPPED=0
+# 新版本沿用的监听端口，配置迁移后回填，用于启停时的端口就绪判断
+PORT=""
 if systemctl is-active --quiet "$SERVICE"; then SERVICE_WAS_ACTIVE=1; fi
 if [ -f "$UNIT_PATH" ]; then cp -f "$UNIT_PATH" "$BACKUP_UNIT"; fi
 
 echo "=== 更新 PHP \${FROM} → \${TO} ==="
 echo "[面板] 新版本将安装到 \${NEW_PREFIX}，旧版本在更新完成前保持可用"
 
+# 上次失败可能留下半成品目录（缺少完整安装结果），本次先清理以保证全量编译，
+# 否则 make install 会因 bin/php 已存在而被跳过，带着残缺的二进制继续升级
+if [ -d "$NEW_PREFIX" ] && ! systemctl cat "$SERVICE" 2>/dev/null | grep -q "ExecStart=$NEW_PREFIX"; then
+  echo "[面板] 清理上次残留的新版本目录 $NEW_PREFIX"
+  rm -rf "$NEW_PREFIX"
+fi
+
+# 历史上的手工启动进程不受 systemd 托管，systemctl stop 对它无效，会一直占用
+# fpm 端口导致新版本 bind 失败；这里按端口兜底，等待释放并在必要时结束旧 master
+wait_port_free() {
+  local port="$1" i=0
+  [ -n "$port" ] || return 0
+  while ss -H -lnt 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; do
+    i=$((i + 1))
+    [ "$i" -ge 30 ] && return 1
+    sleep 0.5
+  done
+  return 0
+}
+
+free_port() {
+  local port="$1" pid pids=""
+  [ -n "$port" ] || return 0
+  wait_port_free "$port" && return 0
+  pids=$(ss -H -lntp 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {print}' | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true)
+  for pid in $pids; do
+    if ps -o args= -p "$pid" 2>/dev/null | grep -q '^php-fpm'; then
+      echo "[面板] 结束占用端口 \${port} 的 php-fpm 进程 \$pid（未由 systemd 托管）"
+      kill -TERM "$pid" 2>/dev/null || true
+    else
+      echo "[面板] 端口 \${port} 被非 php-fpm 进程占用：$(ps -o args= -p "$pid" 2>/dev/null || echo "$pid")"
+      return 1
+    fi
+  done
+  wait_port_free "$port" && return 0
+  for pid in $pids; do
+    ps -o args= -p "$pid" 2>/dev/null | grep -q '^php-fpm' && kill -KILL "$pid" 2>/dev/null || true
+  done
+  wait_port_free "$port" || { echo "[面板] 端口 \${port} 无法释放"; return 1; }
+}
+
+# 启动后需等待 unit 真正 active 且端口已监听，避免刚 fork 就误判成功
+wait_service_ready() {
+  local port="$1" i=0
+  while [ "$i" -lt 20 ]; do
+    if systemctl is-active --quiet "$SERVICE"; then
+      if [ -z "$port" ] || ss -H -lnt 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; then
+        return 0
+      fi
+    fi
+    sleep 0.5
+    i=$((i + 1))
+  done
+  return 1
+}
+
 rollback() {
   echo "[面板] 更新失败，正在回滚到 PHP ${from}"
+  if [ "$SERVICE_STOPPED" = 1 ]; then
+    systemctl stop "$SERVICE" 2>/dev/null || true
+  fi
+  free_port "$PORT" || true
+  # 未启用成功的新版本目录会让面板把它当成已安装版本（与旧版共用 unit 名），回滚时清理
+  if [ "$NEW_PREFIX" != "$OLD_PREFIX" ] && [ -d "$NEW_PREFIX" ]; then
+    if ps -eo args= 2>/dev/null | grep -qF "$NEW_PREFIX/sbin/php-fpm"; then
+      echo "[面板] 新版本目录仍被进程使用，保留 $NEW_PREFIX"
+    else
+      echo "[面板] 清理未启用的新版本目录 $NEW_PREFIX"
+      rm -rf "$NEW_PREFIX"
+    fi
+  fi
   # 编译阶段失败时 service unit 尚未改写，运行中的旧版本无需重启
   if [ -f "$BACKUP_UNIT" ] && cmp -s "$BACKUP_UNIT" "$UNIT_PATH"; then
     echo "[面板] service 配置未变化，PHP ${from} 保持运行"
     return 0
-  fi
-  if [ "$SERVICE_STOPPED" = 1 ]; then
-    systemctl stop "$SERVICE" 2>/dev/null || true
   fi
   if [ -f "$BACKUP_UNIT" ]; then
     cp -f "$BACKUP_UNIT" "$UNIT_PATH"
@@ -1011,6 +1079,7 @@ rollback() {
   fi
   if [ "$SERVICE_WAS_ACTIVE" = 1 ]; then
     systemctl start "$SERVICE" 2>/dev/null || true
+    wait_service_ready "$PORT" || echo "[面板] 旧版本未能恢复监听，请检查 \${OLD_PREFIX}/var/log/php-fpm.log"
   fi
   echo "[面板] 当前服务状态：$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
   echo "[面板] 旧版本 \${OLD_PREFIX} 已保留，站点配置无需修改"
@@ -1050,15 +1119,27 @@ if ! "$NEW_PREFIX/sbin/php-fpm" -t; then
   exit 1
 fi
 
+# 迁移后的 www.conf 即为实际监听端口，后续停止/启动都以它为准
+PORT=$(sed -n "s/^listen *= *127\\.0\\.0\\.1:\\([0-9]\\{1,\\}\\)$/\\1/p" "$NEW_PREFIX/etc/php-fpm.d/www.conf" 2>/dev/null | head -1)
+if [ -n "$PORT" ]; then
+  echo "[面板] 新版本将沿用监听端口 127.0.0.1:\${PORT}"
+else
+  echo "[面板] 未能识别 www.conf 的 listen 端口，跳过端口就绪检查"
+fi
+
 echo "[面板] 停止旧服务并启动新版本"
 SERVICE_STOPPED=1
 systemctl stop "$SERVICE" 2>/dev/null || true
+# systemctl stop 对历史上手工启动的 fpm master 无效，必须确认端口已释放再启动新版本
+if ! free_port "$PORT"; then
+  rollback
+  exit 1
+fi
 if ! systemctl start "$SERVICE"; then
   rollback
   exit 1
 fi
-sleep 1
-if systemctl is-active --quiet "$SERVICE"; then
+if wait_service_ready "$PORT"; then
   echo "[面板] PHP \${TO} 已启动，服务运行正常"
   # 新版本沿用旧 www.conf 的监听端口，站点 fastcgi_pass 无需修改
   echo "[面板] 清理旧版本目录 \${OLD_PREFIX}"
