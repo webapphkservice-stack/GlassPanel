@@ -140,10 +140,17 @@ async function control(action) {
   const allowed = ['start', 'stop', 'restart', 'reload'];
   if (!allowed.includes(action)) throw new Error('非法操作');
   let result = await run('systemctl', [action, servicesConfig.service]);
-  // start/restart 因端口被占失败时，结束遗留的非托管 master 后重试一次
   if (result.exitCode !== 0 && (action === 'start' || action === 'restart')) {
-    const output = `${result.stderr || ''}${result.stdout || ''}`;
-    if (/Address already in use|still could not bind/i.test(output) && (await stopUntrackedMasters())) {
+    // 用 unit 的 Result 判定失败类型，不依赖 systemctl 的本地化提示文本
+    const state = await run('systemctl', ['show', servicesConfig.service, '-p', 'Result']);
+    const reason = String(state.stdout || '').trim().replace(/^Result=/, '');
+    if (reason === 'start-limit-hit') {
+      // 短时间内的重复启停会触发 systemd 的启动频率限制（默认 5 次/10 秒），
+      // unit 被锁定为 failed 后即使配置正常也无法启动，需先解除锁定再启动
+      await run('systemctl', ['reset-failed', servicesConfig.service]);
+      result = await run('systemctl', ['start', servicesConfig.service]);
+    } else if (await stopUntrackedMasters()) {
+      // 启动失败时若存在历史遗留的非托管 nginx master（占用 80/443），结束它后重试一次
       result = await run('systemctl', [action, servicesConfig.service]);
     }
   }

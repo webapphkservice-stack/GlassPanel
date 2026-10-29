@@ -1078,6 +1078,7 @@ rollback() {
     systemctl daemon-reload
   fi
   if [ "$SERVICE_WAS_ACTIVE" = 1 ]; then
+    systemctl reset-failed "$SERVICE" 2>/dev/null || true
     systemctl start "$SERVICE" 2>/dev/null || true
     wait_service_ready "$PORT" || echo "[面板] 旧版本未能恢复监听，请检查 \${OLD_PREFIX}/var/log/php-fpm.log"
   fi
@@ -1135,6 +1136,8 @@ if ! free_port "$PORT"; then
   rollback
   exit 1
 fi
+# 解除可能残留的启动频率限制，避免 unit 锁定为 failed 后无法启动
+systemctl reset-failed "$SERVICE" 2>/dev/null || true
 if ! systemctl start "$SERVICE"; then
   rollback
   exit 1
