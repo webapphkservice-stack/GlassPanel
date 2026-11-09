@@ -33,6 +33,20 @@ export const restoreDbBackup = (name, file) =>
 export const deleteDbBackup = (name, file) =>
   request.delete(`/mysql/databases/${encodeURIComponent(name)}/backups`, { params: { file } });
 
+// —— 数据表浏览与行编辑 ——
+export const getDbTables = (name) =>
+  request.get(`/mysql/databases/${encodeURIComponent(name)}/tables`);
+export const getDbTableStructure = (name, table) =>
+  request.get(`/mysql/databases/${encodeURIComponent(name)}/tables/${encodeURIComponent(table)}/structure`);
+export const getDbTableRows = (name, table, params) =>
+  request.get(`/mysql/databases/${encodeURIComponent(name)}/tables/${encodeURIComponent(table)}/rows`, { params });
+export const insertDbRow = (name, table, values) =>
+  request.post(`/mysql/databases/${encodeURIComponent(name)}/tables/${encodeURIComponent(table)}/rows`, { values });
+export const updateDbRow = (name, table, key, values) =>
+  request.patch(`/mysql/databases/${encodeURIComponent(name)}/tables/${encodeURIComponent(table)}/rows`, { key, values });
+export const deleteDbRow = (name, table, key) =>
+  request.delete(`/mysql/databases/${encodeURIComponent(name)}/tables/${encodeURIComponent(table)}/rows`, { data: { key } });
+
 // —— 数据库定时备份任务 ——
 export const getDbBackupTasks = () => request.get('/mysql/backup-tasks');
 export const createDbBackupTask = (data) => request.post('/mysql/backup-tasks', data);

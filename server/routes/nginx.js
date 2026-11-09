@@ -70,11 +70,73 @@ router.post('/test', async (req, res, next) => {
   }
 });
 
+// 站点备注：仅面板侧展示用的中文别名，键为站点名，存放在 settings 表
+const SITE_REMARK_KEY = 'nginx_site_remarks';
+const REMARK_MAX = 40;
+
+function readSiteRemarks() {
+  try {
+    const parsed = JSON.parse(store.getSetting(SITE_REMARK_KEY, '{}'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (err) {
+    return {};
+  }
+}
+
 router.get('/sites', async (req, res, next) => {
   try {
     const sites = await nginx.listSites();
-    res.json({ sites });
+    const remarks = readSiteRemarks();
+    res.json({ sites: sites.map((site) => ({ ...site, remark: remarks[site.name] || '' })) });
   } catch (err) {
+    next(err);
+  }
+});
+
+// 设置/清除站点备注：备注为空时删除该站点记录，站点名不会用于文件路径
+router.patch('/sites/:name/remark', async (req, res, next) => {
+  try {
+    const name = String(req.params.name || '');
+    if (!name || name.length > 200 || /[\u0000-\u001f]/.test(name)) {
+      return res.status(400).json({ error: '站点名称不合法' });
+    }
+    const raw = typeof req.body?.remark === 'string' ? req.body.remark : '';
+    const remark = raw.replace(/[\u0000-\u001f]/g, '').trim().slice(0, REMARK_MAX);
+    const remarks = readSiteRemarks();
+    if (remark) remarks[name] = remark;
+    else delete remarks[name];
+    store.setSetting(SITE_REMARK_KEY, JSON.stringify(remarks));
+    store.addLog(req.user.username, 'nginx_site_remark', `${name}${remark ? ` -> ${remark}` : '（已清除）'}`);
+    res.json({ success: true, remark });
+  } catch (err) {
+    logger.error('Set site remark failed', { error: err.message });
+    next(err);
+  }
+});
+
+// 未绑定域名的默认站点：启用后 Host 未匹配任何站点时统一返回「站点已停止」页
+router.get('/default-site', async (req, res, next) => {
+  try {
+    res.json(await nginx.getDefaultSite());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/default-site', async (req, res, next) => {
+  try {
+    const enabled = Boolean(req.body?.enabled);
+    const result = await nginx.setDefaultSite(enabled);
+    if (result.changed) {
+      store.addLog(
+        req.user.username,
+        'nginx_default_site',
+        enabled ? '启用未绑定域名停止页' : '关闭未绑定域名停止页'
+      );
+    }
+    res.json({ success: true, ...result });
+  } catch (err) {
+    logger.error('Set nginx default site failed', { error: err.message });
     next(err);
   }
 });
@@ -194,6 +256,21 @@ router.delete('/sites/:name/files', async (req, res, next) => {
   try {
     const result = await siteFiles.removeEntry(req.params.name, String(req.query.path || ''));
     store.addLog(req.user.username, 'nginx_site_file_delete', `${req.params.name}:/${result.path}`);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 重命名站点内条目：仅修改同一目录下的名称，不允许移动目录或覆盖已有条目
+router.post('/sites/:name/files/rename', async (req, res, next) => {
+  try {
+    const result = await siteFiles.renameEntry(
+      req.params.name,
+      String(req.body?.path || ''),
+      String(req.body?.name || '')
+    );
+    store.addLog(req.user.username, 'nginx_site_file_rename', `${req.params.name}:/${result.from} -> /${result.to}`);
     res.json({ success: true, ...result });
   } catch (err) {
     next(err);

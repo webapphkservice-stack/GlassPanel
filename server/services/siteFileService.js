@@ -276,6 +276,48 @@ async function removeEntry(siteName, relPath) {
   return { path: toRelative(rootReal, abs), type: stat.isDirectory() ? 'dir' : 'file' };
 }
 
+// 重命名：只改同一目录下的条目名称，不允许移动目录或覆盖已有条目
+async function renameEntry(siteName, relPath, newName) {
+  const { rootReal } = await getSiteRoot(siteName);
+  if (!String(relPath || '').trim()) throw clientError('缺少 path 参数');
+  const abs = await resolveWithin(rootReal, relPath);
+  if (abs === rootReal) throw clientError('不能重命名站点根目录');
+  let stat;
+  try {
+    stat = await fs.promises.lstat(abs);
+  } catch (err) {
+    if (err.code === 'ENOENT') throw clientError('目标不存在', 404);
+    throw err;
+  }
+  const safe = String(newName || '').trim();
+  if (!safe || safe === '.' || safe === '..') throw clientError('文件名无效');
+  if (/[\\/\u0000-\u001f<>:"|?*]/.test(safe)) throw clientError('文件名包含非法字符');
+  const targetAbs = await resolveWithin(rootReal, toRelative(rootReal, path.join(path.dirname(abs), safe)));
+  // 名称未变化时直接返回，避免误判同名冲突
+  if (targetAbs === abs) {
+    return { from: toRelative(rootReal, abs), to: toRelative(rootReal, abs), name: safe };
+  }
+  const kind = stat.isDirectory() ? '目录' : '文件';
+  try {
+    await fs.promises.lstat(targetAbs);
+    throw clientError(`同名${kind}已存在：${safe}`, 409);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  try {
+    await fs.promises.rename(abs, targetAbs);
+  } catch (err) {
+    if (err.code === 'EEXIST') throw clientError(`同名${kind}已存在：${safe}`, 409);
+    throw err;
+  }
+  return {
+    from: toRelative(rootReal, abs),
+    to: toRelative(rootReal, targetAbs),
+    name: safe,
+    type: stat.isDirectory() ? 'dir' : 'file',
+  };
+}
+
 // —— 解压 ——
 
 const ZIP_SIG_EOCD = 0x06054b50;
@@ -557,6 +599,7 @@ module.exports = {
   saveUpload,
   resolveForDownload,
   removeEntry,
+  renameEntry,
   extractArchive,
   MAX_UPLOAD_SIZE,
 };

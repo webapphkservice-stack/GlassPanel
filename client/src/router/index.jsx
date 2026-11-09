@@ -8,6 +8,8 @@ import Nginx from '@/pages/Nginx';
 import Php from '@/pages/Php';
 import Mysql from '@/pages/Mysql';
 import Redis from '@/pages/Redis';
+import Nodejs from '@/pages/Nodejs';
+import Geth from '@/pages/Geth';
 import Supervisor from '@/pages/Supervisor';
 import Firewall from '@/pages/Firewall';
 import Ssl from '@/pages/Ssl';
@@ -37,6 +39,8 @@ export default function AppRouter() {
         <Route path="php" element={<Php />} />
         <Route path="mysql" element={<Mysql />} />
         <Route path="redis" element={<Redis />} />
+        <Route path="nodejs" element={<Nodejs />} />
+        <Route path="geth" element={<Geth />} />
         <Route path="supervisor" element={<Supervisor />} />
         <Route path="firewall" element={<Firewall />} />
         <Route path="fail2ban" element={<Fail2ban />} />

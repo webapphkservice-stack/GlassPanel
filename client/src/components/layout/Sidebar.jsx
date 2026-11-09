@@ -4,7 +4,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { useUIStore, useAuthStore } from '@/store';
 import {
   Home, Globe, Server, Database, Cpu, Shield, Lock,
-  Activity, Package, LogOut, Ban, Pencil,
+  Activity, Package, LogOut, Ban, Pencil, Box, Network,
 } from '@/components/common/Icons';
 import GlassModal from '@/components/common/GlassModal';
 import LiquidButton from '@/components/common/LiquidButton';
@@ -73,6 +73,8 @@ export default function Sidebar() {
     { path: '/php', label: t('sidebar.php'), icon: Server },
     { path: '/mysql', label: t('sidebar.mysql'), icon: Database },
     { path: '/redis', label: t('sidebar.redis'), icon: Cpu },
+    { path: '/nodejs', label: t('sidebar.nodejs'), icon: Box },
+    { path: '/geth', label: t('sidebar.geth'), icon: Network },
     { path: '/supervisor', label: t('sidebar.supervisor'), icon: Activity },
     { path: '/firewall', label: t('sidebar.firewall'), icon: Shield },
     { path: '/fail2ban', label: t('sidebar.fail2ban'), icon: Ban },

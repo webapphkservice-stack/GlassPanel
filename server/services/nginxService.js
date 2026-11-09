@@ -22,6 +22,10 @@ const SITE_ROOT_MARK_RE = /^#\s*glass-panel:site-root\s+(.+?)\s*$/m;
 // 使该域名仍由本 server 块处理，否则请求会落到同端口上其它站点（域名串站）
 const STOP_PAGE_MARK = '# glass-panel:stopped-site';
 const STOP_PAGE_HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Service Stopped</title><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0f172a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}.card{max-width:520px;margin:24px;padding:48px 40px;text-align:center;border:1px solid rgba(255,255,255,.08);border-radius:20px;background:rgba(255,255,255,.03)}.code{font-size:13px;letter-spacing:.3em;color:#64748b}h1{margin:16px 0 8px;font-size:28px;font-weight:600}p{margin:0;color:#94a3b8;font-size:15px;line-height:1.7}</style></head><body><div class="card"><div class="code">503</div><h1>Service Stopped</h1><p>This website is currently unavailable.</p><p>The service has been stopped by the administrator. Please try again later.</p></div></body></html>';
+// 未绑定域名的默认站点：请求的 Host 未匹配任何站点时返回停止页。
+// 文件名以 000 开头，保证先于其他站点被加载；真正生效依赖 default_server 标记
+const DEFAULT_SITE_FILE = path.join(SITE_DIR, '000-default-site.conf');
+const DEFAULT_SITE_MARK = '# glass-panel:default-site';
 
 // 站点独立日志目录：与 Fail2ban 站点保护使用的路径、格式完全一致
 // （fail2banService.siteLogLines），两处写入同一行内容，重复注入时互相幂等
@@ -341,7 +345,8 @@ async function listLoadedSites(fpmByListen) {
 async function listSites() {
   const fpmByListen = await buildFpmVersionMap();
   const active = (await listLoadedSites(fpmByListen))
-    .filter((site) => !site.stopped)
+    // 默认站点（未绑定域名兜底）不是用户站点，不在列表中展示
+    .filter((site) => !site.stopped && site.file !== DEFAULT_SITE_FILE)
     .map((site) => ({ ...site, enabled: true }));
   return [...active, ...(await listDisabledSites(fpmByListen))];
 }
@@ -1202,7 +1207,9 @@ async function getSiteRelations(siteName) {
     extraFiles,
     serverName: site?.serverName || '',
     primaryDomain: primary,
-    root: site?.root || '',
+    // 删除针对整个网站根目录：site.root 是 nginx 的运行目录（public/web 等），
+    // 用它会导致只删运行目录、业务文件残留在站点根，重建同域名时旧文件重新可见
+    root: site?.siteDir || site?.root || '',
     dbName,
     dbExists: dbName ? await mysqlService.databaseExists(dbName) : false,
     certName: primary,
@@ -1242,6 +1249,19 @@ async function deleteSite(siteName, { removeDb = true, removeSsl = true } = {}) 
   }
 
   let certificate = null;
+  // 默认站点可能复用该站点的证书：删除证书前先切换到其他可用证书，避免默认站点配置失效
+  if (removeSsl && relations.certExists && fs.existsSync(DEFAULT_SITE_FILE)) {
+    try {
+      const liveDir = path.join('/etc/letsencrypt/live', relations.primaryDomain);
+      const text = await fs.promises.readFile(DEFAULT_SITE_FILE, 'utf8');
+      if (text.includes(liveDir)) {
+        const cert = await pickDefaultCertificate();
+        await fs.promises.writeFile(DEFAULT_SITE_FILE, buildDefaultSiteConfig(cert), 'utf8');
+      }
+    } catch (err) {
+      warnings.push(`默认站点证书切换失败：${err.message}`);
+    }
+  }
   if (removeSsl && relations.certExists) {
     const result = await run('certbot', ['delete', '--cert-name', relations.primaryDomain, '--non-interactive'], {
       timeout: 120000,
@@ -1344,6 +1364,116 @@ function isStopPageFile(filePath) {
   } catch (err) {
     return false;
   }
+}
+
+// —— 未绑定域名的默认站点 ——
+// 443 需要一个可用证书才能完成 TLS 握手：优先复用已有站点的证书，避免额外签发
+async function pickDefaultCertificate() {
+  let entries = [];
+  try {
+    entries = (await fs.promises.readdir(SITE_DIR)).filter((name) => name.endsWith('.conf')).sort();
+  } catch (err) {
+    return null;
+  }
+  for (const name of entries) {
+    const file = path.join(SITE_DIR, name);
+    if (file === DEFAULT_SITE_FILE) continue;
+    try {
+      const text = await fs.promises.readFile(file, 'utf8');
+      const cert = text.match(/^\s*ssl_certificate\s+([^;]+);/m)?.[1]?.trim();
+      const key = text.match(/^\s*ssl_certificate_key\s+([^;]+);/m)?.[1]?.trim();
+      if (cert && key && fs.existsSync(cert) && fs.existsSync(key)) return { cert, key, from: name };
+    } catch (err) {
+      // 单个配置不可读不影响其他候选
+    }
+  }
+  return null;
+}
+
+function buildDefaultSiteConfig(cert) {
+  const ipv6 = fs.existsSync('/proc/net/if_inet6');
+  const block = (listenLines) => [
+    'server {',
+    ...listenLines,
+    '    server_name _;',
+    '    add_header Cache-Control "no-store" always;',
+    '    location / {',
+    '        default_type text/html;',
+    `        return 503 '${STOP_PAGE_HTML}';`,
+    '    }',
+    '}',
+  ];
+  const lines = [
+    DEFAULT_SITE_MARK,
+    '# 未绑定域名的默认站点：请求的 Host 未匹配任何站点时返回站点停止页',
+    ...block([
+      '    listen 80 default_server;',
+      ...(ipv6 ? ['    listen [::]:80 default_server;'] : []),
+    ]),
+  ];
+  if (cert) {
+    lines.push(
+      ...block([
+        '    listen 443 ssl default_server;',
+        ...(ipv6 ? ['    listen [::]:443 ssl default_server;'] : []),
+        `    ssl_certificate ${cert.cert};`,
+        `    ssl_certificate_key ${cert.key};`,
+      ])
+    );
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+async function getDefaultSite() {
+  const enabled = fs.existsSync(DEFAULT_SITE_FILE);
+  let certificate = '';
+  if (enabled) {
+    try {
+      const text = await fs.promises.readFile(DEFAULT_SITE_FILE, 'utf8');
+      certificate = text.match(/^\s*ssl_certificate\s+([^;]+);/m)?.[1]?.trim() || '';
+    } catch (err) {
+      // 读取失败时仅返回启用状态
+    }
+  }
+  return { enabled, file: DEFAULT_SITE_FILE, certificate };
+}
+
+// 启用/关闭默认站点：写入或移除配置后重载；校验或重载失败时还原文件，避免留下坏配置
+async function setDefaultSite(enabled) {
+  const exists = fs.existsSync(DEFAULT_SITE_FILE);
+  if (Boolean(enabled) === exists) return { ...(await getDefaultSite()), changed: false, reloaded: false };
+
+  if (!enabled) {
+    const previous = await fs.promises.readFile(DEFAULT_SITE_FILE, 'utf8').catch(() => '');
+    await fs.promises.unlink(DEFAULT_SITE_FILE).catch(() => {});
+    const test = await run('nginx', ['-t']);
+    if (test.exitCode !== 0) {
+      if (previous) await fs.promises.writeFile(DEFAULT_SITE_FILE, previous, 'utf8').catch(() => {});
+      throw new Error(`配置校验失败：${(test.stderr || test.stdout || '').trim().slice(0, 300)}`);
+    }
+    const reload = await run('systemctl', ['reload', servicesConfig.service]);
+    if (reload.exitCode !== 0) {
+      if (previous) await fs.promises.writeFile(DEFAULT_SITE_FILE, previous, 'utf8').catch(() => {});
+      await run('systemctl', ['reload', servicesConfig.service]);
+      throw new Error(`Nginx 重载失败：${(reload.stderr || reload.stdout || '').trim().slice(0, 300)}`);
+    }
+    return { ...(await getDefaultSite()), changed: true, reloaded: true };
+  }
+
+  const cert = await pickDefaultCertificate();
+  await fs.promises.writeFile(DEFAULT_SITE_FILE, buildDefaultSiteConfig(cert), 'utf8');
+  const test = await run('nginx', ['-t']);
+  if (test.exitCode !== 0) {
+    await fs.promises.unlink(DEFAULT_SITE_FILE).catch(() => {});
+    throw new Error(`配置校验失败：${(test.stderr || test.stdout || '').trim().slice(0, 300)}`);
+  }
+  const reload = await run('systemctl', ['reload', servicesConfig.service]);
+  if (reload.exitCode !== 0) {
+    await fs.promises.unlink(DEFAULT_SITE_FILE).catch(() => {});
+    await run('systemctl', ['reload', servicesConfig.service]);
+    throw new Error(`Nginx 重载失败：${(reload.stderr || reload.stdout || '').trim().slice(0, 300)}`);
+  }
+  return { ...(await getDefaultSite()), changed: true, reloaded: true };
 }
 
 // 停止站点：原配置移出 nginx 加载范围，原位置写入停止占位页并重载。
@@ -1498,6 +1628,8 @@ module.exports = {
   deleteSite,
   stopSite,
   restartSite,
+  getDefaultSite,
+  setDefaultSite,
   readConfig,
   writeConfig,
   enableSiteLog,

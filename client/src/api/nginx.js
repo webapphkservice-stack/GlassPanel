@@ -4,6 +4,12 @@ export const getNginxStatus = () => request.get('/nginx/status');
 export const controlNginx = (action) => request.post(`/nginx/control/${action}`);
 export const testNginxConfig = () => request.post('/nginx/test');
 export const getNginxSites = () => request.get('/nginx/sites');
+// 未绑定域名的默认站点：开启后未匹配任何站点的域名统一返回停止页
+export const getDefaultSite = () => request.get('/nginx/default-site');
+export const setDefaultSite = (enabled) => request.post('/nginx/default-site', { enabled }, { timeout: 60000 });
+// 站点备注：仅面板展示用的别名，保存在面板数据库
+export const setSiteRemark = (name, remark) =>
+  request.patch(`/nginx/sites/${encodeURIComponent(name)}/remark`, { remark });
 // 站点空间占用：遍历站点根目录统计，目录较大时耗时较长
 export const getSiteSizes = () => request.get('/nginx/sites/sizes', { timeout: 120000 });
 // 创建站点可能同时签发证书，耗时较长，单独放宽超时
@@ -34,7 +40,7 @@ export const getSiteFiles = (name, dir = '') =>
   request.get(`/nginx/sites/${encodeURIComponent(name)}/files`, { params: { dir } });
 export const createSiteDir = (name, path) =>
   request.post(`/nginx/sites/${encodeURIComponent(name)}/files/dirs`, { path });
-export const uploadSiteFile = (name, dir, file, overwrite = true) =>
+export const uploadSiteFile = (name, dir, file, overwrite = true, onProgress) =>
   request.post(
     `/nginx/sites/${encodeURIComponent(name)}/files/upload`,
     file,
@@ -42,6 +48,17 @@ export const uploadSiteFile = (name, dir, file, overwrite = true) =>
       params: { dir, name: file.name, overwrite },
       headers: { 'Content-Type': 'application/octet-stream' },
       timeout: 600000,
+      // 大文件上传时汇报进度；部分环境拿不到 total，按文件大小兜底
+      onUploadProgress: (event) => {
+        if (!onProgress) return;
+        const total = Number(event.total) || file.size || 0;
+        const loaded = Number(event.loaded) || 0;
+        onProgress({
+          loaded,
+          total,
+          percent: total ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+        });
+      },
     }
   );
 export const downloadSiteFile = (name, path) =>
@@ -52,6 +69,9 @@ export const downloadSiteFile = (name, path) =>
   });
 export const deleteSiteFile = (name, path) =>
   request.delete(`/nginx/sites/${encodeURIComponent(name)}/files`, { params: { path } });
+// 重命名：仅修改同一目录下的名称，path 为原路径，name 为新名称
+export const renameSiteFile = (name, path, newName) =>
+  request.post(`/nginx/sites/${encodeURIComponent(name)}/files/rename`, { path, name: newName });
 // 解压压缩包可能耗时较长，单独放宽超时；dest 留空由服务端按压缩包名推导默认目录
 export const extractSiteFile = (name, path, dest = '') =>
   request.post(

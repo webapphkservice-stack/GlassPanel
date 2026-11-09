@@ -10,12 +10,13 @@ import StatusBadge from '@/components/common/StatusBadge';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
 import {
-  Play, Square, RefreshCw, Database, Plus, Package, Copy, KeyRound, Eye, EyeOff, Trash2, Clock, Pencil,
+  Play, Square, RefreshCw, Database, Plus, Package, Copy, KeyRound, Eye, EyeOff, Trash2, Clock, Pencil, FileText,
 } from '@/components/common/Icons';
 import { useUIStore } from '@/components/common/uiStore';
 import CreateDatabaseModal from '@/components/mysql/CreateDatabaseModal';
 import DbBackupModal from '@/components/mysql/DbBackupModal';
 import DbBackupTaskModal from '@/components/mysql/DbBackupTaskModal';
+import DbEditorModal from '@/components/mysql/DbEditorModal';
 
 export default function Mysql() {
   const { t } = useTranslation();
@@ -27,6 +28,8 @@ export default function Mysql() {
   const [createOpen, setCreateOpen] = useState(false);
   // 当前打开备份弹窗的数据库名，空串表示未打开
   const [backupDb, setBackupDb] = useState('');
+  // 当前打开数据管理弹窗的数据库名，空串表示未打开
+  const [editorDb, setEditorDb] = useState('');
   // 已切换为明文显示的密码，键为库名
   const [revealed, setRevealed] = useState({});
   // 正在重置密码的库名
@@ -254,6 +257,15 @@ export default function Mysql() {
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
+                    onClick={() => setEditorDb(db.name)}
+                    title={t('mysql.manageData')}
+                    className="flex flex-none items-center gap-1 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-1 text-[11px] text-cyan-300 transition-colors hover:bg-cyan-500/20"
+                  >
+                    <FileText className="h-3.5 w-3.5" />
+                    {t('mysql.manageData')}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => handleResetPassword(db)}
                     disabled={resetting === db.name}
                     title={t('mysql.resetPassword')}
@@ -435,6 +447,7 @@ export default function Mysql() {
         onCreated={fetchData}
       />
       <DbBackupModal db={backupDb || null} onClose={() => setBackupDb('')} />
+      <DbEditorModal db={editorDb || null} onClose={() => setEditorDb('')} />
       <DbBackupTaskModal
         open={taskOpen}
         onClose={() => { setTaskOpen(false); setEditingTask(null); }}

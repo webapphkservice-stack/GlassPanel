@@ -17,6 +17,9 @@ import {
   enableSiteOpenBasedir,
   setSitePhpVersion,
   getProvisionStatus,
+  setSiteRemark,
+  getDefaultSite,
+  setDefaultSite,
 } from '@/api/nginx';
 import GlassCard from '@/components/common/GlassCard';
 import LiquidButton from '@/components/common/LiquidButton';
@@ -30,7 +33,7 @@ import SiteFileBrowser from '@/components/site/SiteFileBrowser';
 import SiteTrafficModal from '@/components/site/SiteTrafficModal';
 import SiteBackupModal from '@/components/site/SiteBackupModal';
 import ProvisionFlowModal from '@/components/site/ProvisionFlowModal';
-import { Play, Square, RefreshCw, FileText, Globe, Check, Plus } from '@/components/common/Icons';
+import { Play, Square, RefreshCw, FileText, Globe, Check, Plus, Pencil, X } from '@/components/common/Icons';
 import { useUIStore } from '@/components/common/uiStore';
 import { useThemeStore } from '@/store';
 
@@ -115,6 +118,13 @@ export default function Nginx() {
   // 正在停止/重启的站点名，用于禁用按钮并显示进行中文案
   const [actingSite, setActingSite] = useState('');
   const [sitesRefreshing, setSitesRefreshing] = useState(false);
+  // 站点备注行内编辑：正在编辑的站点名、草稿值、保存中的站点名
+  const [remarkEditing, setRemarkEditing] = useState('');
+  const [remarkDraft, setRemarkDraft] = useState('');
+  const [remarkSaving, setRemarkSaving] = useState('');
+  // 未绑定域名的默认站点（Host 未匹配任何站点时返回停止页）
+  const [defaultSite, setDefaultSiteState] = useState(null);
+  const [defaultSiteSaving, setDefaultSiteSaving] = useState(false);
   // 站点空间占用：站点名 → 字节数（null 表示无法统计），单独请求避免拖慢列表
   const [siteSizes, setSiteSizes] = useState({});
   const [filesSite, setFilesSite] = useState(null);
@@ -173,9 +183,34 @@ export default function Nginx() {
     }
   }
 
+  async function fetchDefaultSite() {
+    try {
+      setDefaultSiteState(await getDefaultSite());
+    } catch (err) {
+      setDefaultSiteState(null);
+    }
+  }
+
+  // 未绑定域名的默认站点：切换开关后重新读取真实状态，失败时保持原状态
+  async function toggleDefaultSite() {
+    if (!defaultSite || defaultSiteSaving) return;
+    const next = !defaultSite.enabled;
+    setDefaultSiteSaving(true);
+    try {
+      const data = await setDefaultSite(next);
+      setDefaultSiteState(data);
+      toast(next ? t('nginx.defaultSiteEnabled') : t('nginx.defaultSiteDisabled'), 'success');
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+      fetchDefaultSite();
+    } finally {
+      setDefaultSiteSaving(false);
+    }
+  }
+
   useEffect(() => {
     setInitialLoading(true);
-    Promise.all([fetchStatus(), fetchSites(), fetchPhpVersions()]).finally(() => setInitialLoading(false));
+    Promise.all([fetchStatus(), fetchSites(), fetchPhpVersions(), fetchDefaultSite()]).finally(() => setInitialLoading(false));
   }, []);
 
   // 开通进度轮询：创建期间每秒拉取只读快照，抵达终态或进度过期后自动停止。
@@ -266,6 +301,31 @@ export default function Nginx() {
       toast(err?.message || String(err), 'error');
     } finally {
       setLoading(false);
+    }
+  }
+
+  // 站点备注：行内编辑，Enter 保存、Esc 取消，清空即删除备注
+  function startEditRemark(site) {
+    setRemarkEditing(site.name);
+    setRemarkDraft(site.remark || '');
+  }
+
+  async function saveRemark(site) {
+    const remark = remarkDraft.trim();
+    if (remark === (site.remark || '')) {
+      setRemarkEditing('');
+      return;
+    }
+    setRemarkSaving(site.name);
+    try {
+      const res = await setSiteRemark(site.name, remark);
+      setSites((prev) => prev.map((item) => (item.name === site.name ? { ...item, remark: res.remark } : item)));
+      setRemarkEditing('');
+      toast(t('nginx.remarkSaved'), 'success');
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    } finally {
+      setRemarkSaving('');
     }
   }
 
@@ -570,6 +630,25 @@ export default function Nginx() {
               </LiquidButton>
             </div>
           </div>
+          <div className="mb-4 flex flex-col gap-3 rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">{t('nginx.defaultSiteTitle')}</div>
+              <div className="mt-0.5 text-xs leading-relaxed text-white/50">{t('nginx.defaultSiteHint')}</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={Boolean(defaultSite?.enabled)}
+              onClick={toggleDefaultSite}
+              disabled={!defaultSite || defaultSiteSaving}
+              title={t('nginx.defaultSiteToggle')}
+              className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50 ${defaultSite?.enabled ? 'bg-cyan-500' : 'bg-white/15'}`}
+            >
+              <span
+                className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${defaultSite?.enabled ? 'left-[22px]' : 'left-0.5'}`}
+              />
+            </button>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead>
@@ -599,6 +678,55 @@ export default function Nginx() {
                           </span>
                         )}
                       </span>
+                      <div className="mt-1 flex items-center gap-1">
+                        {remarkEditing === site.name ? (
+                          <>
+                            <input
+                              autoFocus
+                              value={remarkDraft}
+                              maxLength={40}
+                              onChange={(e) => setRemarkDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') saveRemark(site);
+                                if (e.key === 'Escape') setRemarkEditing('');
+                              }}
+                              placeholder={t('nginx.siteRemarkPlaceholder')}
+                              className="w-40 rounded-md border border-cyan-500/40 bg-white/5 px-2 py-0.5 text-xs text-white/80 outline-none placeholder:text-white/25 focus:border-cyan-400"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => saveRemark(site)}
+                              disabled={remarkSaving === site.name}
+                              title={t('common.save')}
+                              className="rounded p-0.5 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setRemarkEditing('')}
+                              title={t('common.cancel')}
+                              className="rounded p-0.5 text-white/40 hover:bg-white/10 hover:text-white/80"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <span className={`text-xs ${site.remark ? 'text-cyan-300/80' : 'text-white/25'}`}>
+                              {site.remark || t('nginx.addRemark')}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => startEditRemark(site)}
+                              title={t('nginx.editRemark')}
+                              className="rounded p-0.5 text-white/30 hover:bg-white/10 hover:text-white/70"
+                            >
+                              <Pencil className="h-3 w-3" />
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </td>
                     <td className="py-3 text-white/70">{site.listen}</td>
                     <td className="py-3 text-white/70">

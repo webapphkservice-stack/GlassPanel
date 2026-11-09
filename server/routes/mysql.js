@@ -1,5 +1,6 @@
 const express = require('express');
 const mysql = require('../services/mysqlService');
+const mysqlEditor = require('../services/mysqlEditorService');
 const mysqlBackups = require('../services/mysqlBackupService');
 const mysqlBackupSchedule = require('../services/mysqlBackupScheduleService');
 const nginx = require('../services/nginxService');
@@ -118,6 +119,75 @@ router.delete('/databases/:name', async (req, res, next) => {
     });
     store.deleteManagedDatabase(name);
     store.addLog(req.user.username, 'mysql_database_delete', result.dbName);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// —— 数据表浏览与编辑：界面化查看表结构和行数据，并支持新增/修改/删除单行 ——
+
+router.get('/databases/:name/tables', async (req, res, next) => {
+  try {
+    const tables = await mysqlEditor.listTables(req.params.name);
+    res.json({ tables });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/databases/:name/tables/:table/structure', async (req, res, next) => {
+  try {
+    const result = await mysqlEditor.getStructure(req.params.name, req.params.table);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/databases/:name/tables/:table/rows', async (req, res, next) => {
+  try {
+    const result = await mysqlEditor.getRows(req.params.name, req.params.table, {
+      page: req.query.page,
+      pageSize: req.query.pageSize,
+      orderBy: req.query.orderBy,
+      orderDir: req.query.orderDir,
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/databases/:name/tables/:table/rows', async (req, res, next) => {
+  try {
+    const result = await mysqlEditor.insertRow(req.params.name, req.params.table, req.body?.values || {});
+    store.addLog(req.user.username, 'mysql_row_insert', `${req.params.name}.${req.params.table}`);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch('/databases/:name/tables/:table/rows', async (req, res, next) => {
+  try {
+    const result = await mysqlEditor.updateRow(
+      req.params.name,
+      req.params.table,
+      req.body?.key || {},
+      req.body?.values || {}
+    );
+    store.addLog(req.user.username, 'mysql_row_update', `${req.params.name}.${req.params.table}`);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete('/databases/:name/tables/:table/rows', async (req, res, next) => {
+  try {
+    const result = await mysqlEditor.deleteRow(req.params.name, req.params.table, req.body?.key || {});
+    store.addLog(req.user.username, 'mysql_row_delete', `${req.params.name}.${req.params.table}`);
     res.json({ success: true, ...result });
   } catch (err) {
     next(err);

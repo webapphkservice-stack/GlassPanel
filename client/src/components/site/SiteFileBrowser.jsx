@@ -10,9 +10,10 @@ import {
   uploadSiteFile,
   downloadSiteFile,
   deleteSiteFile,
+  renameSiteFile,
   extractSiteFile,
 } from '@/api/nginx';
-import { Upload, Download, Folder, FolderOpen, File, Home, Plus, RefreshCw, Trash2, Package } from '@/components/common/Icons';
+import { Upload, Download, Folder, FolderOpen, File, Home, Plus, RefreshCw, Trash2, Package, Pencil } from '@/components/common/Icons';
 import { useUIStore } from '@/components/common/uiStore';
 
 function joinPath(dir, name) {
@@ -46,11 +47,17 @@ export default function SiteFileBrowser({ site, onClose }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState('');
+  // 当前文件的上传进度：{ loaded, total, percent }，无上传时为 null
+  const [uploadProgress, setUploadProgress] = useState(null);
   const [newDirName, setNewDirName] = useState('');
   const [creatingDir, setCreatingDir] = useState(false);
   const [extractTarget, setExtractTarget] = useState('');
   const [extractDest, setExtractDest] = useState('');
   const [extracting, setExtracting] = useState(false);
+  // 重命名：renameTarget 为当前展开编辑行的条目名，renameValue 为输入的新名称
+  const [renameTarget, setRenameTarget] = useState('');
+  const [renameValue, setRenameValue] = useState('');
+  const [renaming, setRenaming] = useState(false);
   const fileInputRef = useRef(null);
   const open = Boolean(site);
 
@@ -84,6 +91,7 @@ export default function SiteFileBrowser({ site, onClose }) {
 
   async function navigate(nextDir) {
     setExtractTarget('');
+    setRenameTarget('');
     setLoading(true);
     await fetchList(nextDir);
   }
@@ -106,13 +114,15 @@ export default function SiteFileBrowser({ site, onClose }) {
           if (!overwrite) continue;
         }
         setUploading(file.name);
-        await uploadSiteFile(site.name, dir, file, overwrite);
+        setUploadProgress({ loaded: 0, total: file.size || 0, percent: 0 });
+        await uploadSiteFile(site.name, dir, file, overwrite, setUploadProgress);
         done += 1;
       } catch (err) {
         toast(t('nginx.files.uploadFailed', { name: file.name, error: err?.message || String(err) }), 'error');
       }
     }
     setUploading('');
+    setUploadProgress(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (done > 0) {
       toast(t('nginx.files.uploadDone', { count: done }), 'success');
@@ -172,8 +182,32 @@ export default function SiteFileBrowser({ site, onClose }) {
   }
 
   function openExtract(entry) {
+    setRenameTarget('');
     setExtractTarget(entry.name);
     setExtractDest(defaultExtractDest(dir, entry.name));
+  }
+
+  function openRename(entry) {
+    setExtractTarget('');
+    setRenameTarget(entry.name);
+    setRenameValue(entry.name);
+  }
+
+  async function handleRename() {
+    const target = renameTarget;
+    const name = renameValue.trim();
+    if (!target || !name || name === target) return;
+    setRenaming(true);
+    try {
+      await renameSiteFile(site.name, joinPath(dir, target), name);
+      setRenameTarget('');
+      toast(t('nginx.files.renameDone', { name }), 'success');
+      await fetchList();
+    } catch (err) {
+      toast(t('nginx.files.renameFailed', { error: err?.message || String(err) }), 'error');
+    } finally {
+      setRenaming(false);
+    }
   }
 
   async function handleExtract() {
@@ -273,6 +307,21 @@ export default function SiteFileBrowser({ site, onClose }) {
           </div>
         </div>
 
+        {uploadProgress && (
+          <div className="flex items-center gap-3 text-xs text-white/60">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+              <div
+                className="h-full rounded-full bg-cyan-400 transition-[width] duration-150"
+                style={{ width: `${uploadProgress.percent}%` }}
+              />
+            </div>
+            <span className="w-10 text-right tabular-nums text-cyan-300">{uploadProgress.percent}%</span>
+            <span className="whitespace-nowrap tabular-nums">
+              {formatSize(uploadProgress.loaded)} / {formatSize(uploadProgress.total)}
+            </span>
+          </div>
+        )}
+
         {/* 新建目录 */}
         <div className="flex items-center gap-2">
           <input
@@ -357,6 +406,15 @@ export default function SiteFileBrowser({ site, onClose }) {
                       </td>
                       <td className="px-4 py-2.5">
                         <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => (renameTarget === entry.name ? setRenameTarget('') : openRename(entry))}
+                            disabled={loading || Boolean(uploading) || renaming}
+                            title={t('nginx.files.rename')}
+                            className="rounded-full border border-cyan-500/30 bg-cyan-500/10 p-1.5 text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:opacity-40"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
                           {entry.type === 'file' && (
                             <button
                               type="button"
@@ -387,6 +445,49 @@ export default function SiteFileBrowser({ site, onClose }) {
                         </div>
                       </td>
                     </tr>
+                    {renameTarget === entry.name && (
+                      <tr className="border-b border-white/5 bg-white/[0.04]">
+                        <td colSpan={4} className="px-4 py-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="whitespace-nowrap text-xs text-white/60">
+                              {t('nginx.files.renameLabel')}
+                            </span>
+                            <input
+                              value={renameValue}
+                              onChange={(e) => setRenameValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleRename();
+                                }
+                                if (e.key === 'Escape') {
+                                  e.preventDefault();
+                                  setRenameTarget('');
+                                }
+                              }}
+                              autoFocus
+                              className="min-w-[200px] flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-sm outline-none focus:border-cyan-400"
+                            />
+                            <LiquidButton
+                              onClick={handleRename}
+                              disabled={renaming || !renameValue.trim() || renameValue.trim() === entry.name}
+                              className="!px-4 !py-1.5 !text-xs"
+                            >
+                              {renaming ? t('nginx.files.renaming') : t('common.confirm')}
+                            </LiquidButton>
+                            <button
+                              type="button"
+                              onClick={() => setRenameTarget('')}
+                              disabled={renaming}
+                              className="rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white/70 transition-colors hover:bg-white/10 disabled:opacity-40"
+                            >
+                              {t('common.cancel')}
+                            </button>
+                          </div>
+                          <p className="mt-1.5 text-xs text-white/40">{t('nginx.files.renameHint')}</p>
+                        </td>
+                      </tr>
+                    )}
                     {extractTarget === entry.name && (
                       <tr className="border-b border-white/5 bg-white/[0.04]">
                         <td colSpan={4} className="px-4 py-3">

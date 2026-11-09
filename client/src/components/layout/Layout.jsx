@@ -18,6 +18,8 @@ export default function Layout() {
     '/php': t('layout.phpManagement'),
     '/mysql': t('layout.mysqlManagement'),
     '/redis': t('layout.redisManagement'),
+    '/nodejs': t('layout.nodejsManagement'),
+    '/geth': t('layout.gethManagement'),
     '/supervisor': t('layout.processGuard'),
     '/firewall': t('layout.firewallSettings'),
     '/fail2ban': t('layout.fail2banManagement'),

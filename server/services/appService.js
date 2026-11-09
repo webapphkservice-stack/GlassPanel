@@ -7,6 +7,7 @@ const nginxService = require('./nginxService');
 const sslService = require('./sslService');
 const phpService = require('./phpService');
 const firewallService = require('./firewallService');
+const gethService = require('./gethService');
 
 // 系统仓库/remi 无正式二进制包的版本 → 走源码编译（release → 具体版本号）
 const SOURCE_BUILD = {
@@ -43,6 +44,7 @@ const INSTALL_MARKERS = {
   fail2ban: '/opt/glass-panel/data/fail2ban-compiled-version',
   '3x-ui': '/opt/glass-panel/data/3xui-version',
   gogs: '/opt/glass-panel/data/gogs-version',
+  nodejs: '/opt/glass-panel/data/nodejs-version',
 };
 const PHP_COMPILE_MARKER = INSTALL_MARKERS.php;
 
@@ -279,6 +281,98 @@ async function detectGoArch() {
   if (arch === 'x86_64' || arch === 'amd64') return 'amd64';
   if (arch === 'aarch64' || arch === 'arm64') return 'arm64';
   return '386';
+}
+
+// ---- Node.js 托管运行时 ----
+// 面板自身运行在 /usr/local/bin/node 上（better-sqlite3 为当前 ABI 编译），
+// 因此 Node.js 应用独立安装到 /usr/local/nodejs/<版本>，不改动系统 node，
+// 避免面板重启后加载不了原生模块。
+const NODEJS_ROOT = '/usr/local/nodejs';
+// 官方分发站 + 国内镜像，下载脚本按顺序回退
+const NODEJS_MIRRORS = ['https://nodejs.org/dist', 'https://mirrors.aliyun.com/nodejs-release'];
+let nodeReleasesCache = null;
+let nodeReleasesCacheAt = 0;
+const NODEJS_CACHE_TTL = 10 * 60 * 1000;
+
+// 只提供 LTS 版本：每个主版本取最新补丁，最多保留 5 个主版本
+async function fetchNodeReleases() {
+  const now = Date.now();
+  if (nodeReleasesCache && now - nodeReleasesCacheAt < NODEJS_CACHE_TTL) return nodeReleasesCache;
+  let raw = '';
+  for (const mirror of NODEJS_MIRRORS) {
+    const result = await run('curl', [
+      '-fsSL', '-A', 'glass-panel', '--connect-timeout', '10', `${mirror}/index.json`,
+    ], { timeout: 60000 });
+    if (result.exitCode === 0 && result.stdout) {
+      raw = result.stdout;
+      break;
+    }
+  }
+  if (!raw) throw new Error('无法获取 Node.js 版本列表（服务器网络不可用）');
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    throw new Error('解析 Node.js 版本列表失败');
+  }
+  const byMajor = new Map();
+  for (const item of Array.isArray(data) ? data : []) {
+    if (!item.lts) continue;
+    const version = String(item.version || '').replace(/^v/, '');
+    if (!/^\d+\.\d+\.\d+$/.test(version)) continue;
+    const major = version.split('.')[0];
+    if (!byMajor.has(major)) byMajor.set(major, version);
+  }
+  nodeReleasesCache = [...byMajor.entries()]
+    .sort((a, b) => Number(b[0]) - Number(a[0]))
+    .slice(0, 5)
+    .map(([major, version]) => ({ major: Number(major), version }));
+  nodeReleasesCacheAt = now;
+  return nodeReleasesCache;
+}
+
+// 安装/更新共用：下载官方预编译包 → 解压到 /usr/local/nodejs/v<版本> → 切换 current 软链
+function buildNodeInstallScript(version) {
+  return `#!/usr/bin/env bash
+set -e
+VERSION="${version}"
+ROOT="${NODEJS_ROOT}"
+DEST="$ROOT/v$VERSION"
+MARKER="${INSTALL_MARKERS.nodejs}"
+WORK="/tmp/nodejs-install-$$"
+case "$(uname -m)" in
+  x86_64|amd64) ARCH="linux-x64" ;;
+  aarch64|arm64) ARCH="linux-arm64" ;;
+  *) echo "[面板] 不支持的 CPU 架构：$(uname -m)"; exit 1 ;;
+esac
+TARBALL="node-v$VERSION-$ARCH.tar.xz"
+echo "=== 安装 Node.js $VERSION（$ARCH）==="
+mkdir -p "$ROOT" "$WORK"
+trap 'rm -rf "$WORK"' EXIT
+cd "$WORK"
+OK=0
+for BASE in ${NODEJS_MIRRORS.join(' ')}; do
+  echo "[面板] 下载 $BASE/v$VERSION/$TARBALL"
+  if curl -fL --retry 2 --connect-timeout 15 -o "$TARBALL" "$BASE/v$VERSION/$TARBALL"; then OK=1; break; fi
+  echo "[面板] 该源下载失败，尝试下一个源"
+done
+if [ "$OK" != "1" ]; then echo "[面板] Node.js 安装包下载失败，请检查服务器网络"; exit 1; fi
+echo "[面板] 解压到 $DEST"
+rm -rf "$DEST"
+mkdir -p "$DEST"
+tar -xJf "$TARBALL" -C "$DEST" --strip-components=1
+ln -sfn "$DEST" "$ROOT/current"
+# npm / npx 的 shebang 是 /usr/bin/env node，必须先把新版本放进 PATH
+export PATH="$DEST/bin:$PATH"
+node -v
+npm -v
+# 校验通过后再写版本标记，避免下载/解压中断时留下「已安装」假状态
+mkdir -p "$(dirname "$MARKER")"
+echo "$VERSION" > "$MARKER"
+echo "[面板] 安装完成：$DEST"
+echo "[面板] 稳定入口：$ROOT/current/bin/node（系统 /usr/local/bin/node 未被改动）"
+echo "=== Node.js $VERSION 安装完成 ==="
+`;
 }
 
 function readGogsPort() {
@@ -1467,11 +1561,12 @@ function fail2banUninstallLines() {
   ];
 }
 
-// 源码编译 / pip 安装对应的具体版本号（用于安装成功后写标记文件），非此类安装返回空
+// 源码编译 / pip 安装 / Node.js 预编译包对应的具体版本号（用于安装成功后写标记文件），其它返回空
 function markerVersionFor(key, version) {
   const m = /^官方:(.+)$/.exec(String(version || ''));
   if (!m) return '';
   const release = m[1];
+  if (key === 'nodejs') return /^\d+\.\d+\.\d+$/.test(release) ? release : '';
   if ((SOURCE_BUILD[key] || {})[release]) return SOURCE_BUILD[key][release];
   const pip = (PIP_INSTALL[key] || {})[release];
   if (pip) return pip.split('==')[1] || '';
@@ -1659,6 +1754,19 @@ async function buildInstallScript(key, version, config = {}) {
     const port = String(config.port || readGogsPort() || GOGS_DEFAULT_PORT);
     const downloadUrl = await fetchGogsDownloadUrl(tag, await detectGoArch());
     return { script: buildGogsInstallScript(tag, port, downloadUrl), label: `安装 Gogs ${String(tag).replace(/^v/, '')}` };
+  }
+
+  // Node.js：官方预编译包，版本形如 官方:24.11.0
+  if (key === 'nodejs') {
+    const selected = /^官方:(.+)$/.exec(String(version || ''));
+    let target = selected ? selected[1] : '';
+    if (!target || target === 'latest') {
+      const releases = await fetchNodeReleases();
+      if (!releases.length) throw new Error('无法获取 Node.js 版本列表');
+      target = releases[0].version;
+    }
+    if (!/^\d+\.\d+\.\d+$/.test(target)) throw new Error('Node.js 版本号格式不正确');
+    return { script: buildNodeInstallScript(target), label: `安装 Node.js ${target}` };
   }
 
   const pkg = detectPkgManager();
@@ -1968,6 +2076,30 @@ const APPS = [
     icon: 'Activity',
   },
   {
+    key: 'nodejs',
+    name: 'Node.js',
+    desc: 'JavaScript 运行时（独立安装，支持多版本）',
+    package: null,
+    officialPackage: null,
+    hasOfficial: false,
+    service: null,
+    versionCmd: null,
+    page: '/nodejs',
+    icon: 'Box',
+  },
+  {
+    key: 'geth',
+    name: 'Geth',
+    desc: '以太坊执行层节点（私有链 RPC 服务）',
+    package: null,
+    officialPackage: null,
+    hasOfficial: false,
+    service: 'geth',
+    versionCmd: null,
+    page: '/geth',
+    icon: 'Box',
+  },
+  {
     key: 'ffmpeg',
     name: 'FFmpeg',
     desc: '音视频转码处理工具',
@@ -2133,6 +2265,15 @@ async function listAppVersions(key) {
       versionCmdBin: null,
       pkgVersionSyntax: 'dash',
       versions: await fetchGogsReleases(),
+    };
+  }
+  // Node.js：官方 LTS 版本（每个主版本取最新补丁）
+  if (key === 'nodejs') {
+    const releases = await fetchNodeReleases();
+    return {
+      versionCmdBin: null,
+      pkgVersionSyntax: 'dash',
+      versions: releases.map((r) => `官方:${r.version}`),
     };
   }
   const pkg = detectPkgManager();
@@ -2335,6 +2476,63 @@ async function listApps() {
       continue;
     }
 
+    // Node.js：面板托管的官方预编译运行时，无 systemd 服务
+    if (app.key === 'nodejs') {
+      const marker = readMarker(app.key);
+      let latestVersion = '';
+      let updateAvailable = false;
+      if (marker) {
+        try {
+          const major = marker.split('.')[0];
+          const hit = (await fetchNodeReleases()).find((r) => String(r.major) === major);
+          latestVersion = hit ? hit.version : '';
+          updateAvailable = !!latestVersion && compareVersions(latestVersion, marker) > 0;
+        } catch (e) {
+          // 网络异常时不影响卡片展示
+        }
+      }
+      apps.push({
+        key: app.key,
+        name: app.name,
+        desc: app.desc,
+        package: '',
+        page: app.page,
+        icon: app.icon,
+        hasService: false,
+        installed: !!marker,
+        version: marker || '',
+        status: 'inactive',
+        updateAvailable,
+        latestVersion: updateAvailable ? latestVersion : '',
+        jobRunning: jobService.isRunning(app.key),
+        runtimePath: marker ? `${NODEJS_ROOT}/current/bin/node` : '',
+      });
+      continue;
+    }
+
+    // Geth：系统已安装的以太坊节点，由 systemd 托管，面板仅提供状态与管理页
+    if (app.key === 'geth') {
+      const info = await gethService.getSummary();
+      if (!info.installed) continue;
+      apps.push({
+        key: app.key,
+        name: app.name,
+        desc: app.desc,
+        package: '',
+        page: app.page,
+        icon: app.icon,
+        hasService: true,
+        installed: true,
+        version: info.version || '',
+        status: info.status || 'inactive',
+        updateAvailable: false,
+        latestVersion: '',
+        jobRunning: false,
+        canManage: false,
+      });
+      continue;
+    }
+
     // PHP：支持多版本并存（源码编译 + remi 并行包），
     // 以实际安装的所有版本为准，而不是单一标记文件，
     // 否则装了第二个版本后卡片仍只显示第一个版本，也无法再进入安装。
@@ -2410,6 +2608,7 @@ async function startInstall(key, version = '', config = {}) {
   if (!app) throw new Error('未知应用');
   if (app.systemUpdate) throw new Error('系统更新无需安装，请直接点击更新');
   if (key === 'docker') throw new Error('Docker 由系统维护，面板仅展示运行状态');
+  if (key === 'geth') throw new Error('Geth 由系统维护，面板仅提供状态查看与服务控制');
   if (jobService.isRunning(key)) throw new Error(`${app.name} 正在执行任务中，请等待当前任务完成`);
   // 3x-ui：可选自动反代 + SSL 签发，域名格式提前校验，避免安装完成才发现配置错误
   const domain = key === '3x-ui' ? String(config.domain || '').trim() : '';
@@ -2418,18 +2617,26 @@ async function startInstall(key, version = '', config = {}) {
     throw new Error('域名格式不正确，请输入如 xui.example.com');
   }
   const port = String(config.port || 2255).trim() || '2255';
-  const { script, label } = await buildInstallScript(key, version, config);
+  // Node.js 选 latest 时先解析成具体版本，安装成功后据此写版本标记
+  let effectiveVersion = version;
+  if (key === 'nodejs' && (!version || version === 'latest')) {
+    const releases = await fetchNodeReleases();
+    if (!releases.length) throw new Error('无法获取 Node.js 版本列表');
+    effectiveVersion = `官方:${releases[0].version}`;
+  }
+  const { script, label } = await buildInstallScript(key, effectiveVersion, config);
   // 源码编译 / pip 安装成功后写入版本标记，供面板识别已安装版本与服务名
-  const markerVersion = markerVersionFor(key, version);
+  const markerVersion = markerVersionFor(key, effectiveVersion);
   return jobService.start({
     key,
     label,
     script,
     onDone: async (code) => {
       if (code === 0 && markerVersion) {
-        // PHP 多版本并存时标记只保留最高版本，避免装低版本后覆盖掉升级基线
+        // PHP 多版本并存时标记只保留最高版本，避免装低版本后覆盖掉升级基线；
+        // Node.js 是单运行时（current 指向最后一次安装），标记需跟随安装版本
         const prev = readMarker(key);
-        if (!prev || compareVersions(markerVersion, prev) >= 0) writeMarker(key, markerVersion);
+        if (key === 'nodejs' || !prev || compareVersions(markerVersion, prev) >= 0) writeMarker(key, markerVersion);
       }
       // 3x-ui 安装成功后：按配置自动创建 nginx 反代站点并签发 SSL
       if (code === 0 && key === '3x-ui' && domain) {
@@ -2590,6 +2797,23 @@ exit "$UPDATE_RC"
       script: build3xuiInstallScript(target, port),
     });
   }
+  // Node.js：在当前主版本内升级到最新补丁
+  if (key === 'nodejs') {
+    const installed = readMarker(key);
+    if (!installed) throw new Error('Node.js 尚未安装');
+    const major = installed.split('.')[0];
+    const hit = (await fetchNodeReleases()).find((r) => String(r.major) === major);
+    if (!hit) throw new Error(`未找到 Node.js ${major}.x 的最新版本`);
+    if (compareVersions(hit.version, installed) <= 0) throw new Error(`Node.js 已是最新版本（${installed}）`);
+    return jobService.start({
+      key,
+      label: `更新 Node.js 至 ${hit.version}`,
+      script: buildNodeInstallScript(hit.version),
+      onDone: async (code) => {
+        if (code === 0) writeMarker(key, hit.version);
+      },
+    });
+  }
   const installed = readMarker(key);
   if (!installed) {
     throw new Error(`${app.name} 不是源码编译 / pip 安装的，请通过安装功能或系统仓库更新`);
@@ -2635,6 +2859,7 @@ async function startUninstall(key) {
   const app = APPS.find((a) => a.key === key);
   if (!app) throw new Error('未知应用');
   if (app.systemUpdate) throw new Error('系统更新不支持卸载');
+  if (key === 'geth') throw new Error('Geth 由系统维护，面板不提供卸载');
   if (jobService.isRunning(key)) throw new Error(`${app.name} 正在执行任务中，请等待当前任务完成`);
   // Gogs：二进制 + SQLite，卸载时清理程序、数据目录与标记
   if (key === 'gogs') {
@@ -2651,6 +2876,18 @@ async function startUninstall(key) {
       label: `卸载 ${app.name}`,
       script: xuiUninstallLines().join('\n') + '\n',
     });
+  }
+  // Node.js：只删除面板托管的运行时，系统 /usr/local/bin/node 保持不动
+  if (key === 'nodejs') {
+    const script = `#!/usr/bin/env bash
+echo "=== 卸载 Node.js（面板托管的运行时）==="
+rm -rf ${NODEJS_ROOT}
+rm -f ${INSTALL_MARKERS.nodejs}
+echo "[面板] 已删除 ${NODEJS_ROOT} 与版本标记"
+echo "[面板] 系统 /usr/local/bin/node 未受影响"
+echo "=== 卸载完成：Node.js ==="
+`;
+    return jobService.start({ key, label: `卸载 ${app.name}`, script });
   }
   const pkg = detectPkgManager();
   // 系统源包名与官方源包名都尝试卸载（如 mysql-server / mysql-community-server）
