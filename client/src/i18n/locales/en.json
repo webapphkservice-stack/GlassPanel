@@ -63,6 +63,7 @@
     "firewall": "Firewall",
     "fail2ban": "Fail2ban",
     "ssl": "SSL",
+    "security": "Security",
     "logout": "Logout",
     "version": "Version",
     "editPanelName": "Rename Panel",
@@ -172,6 +173,9 @@
     "serviceStatus": "Core Services Status",
     "envInfo": "Environment Info",
     "os": "OS: ",
+    "kernel": "Kernel: ",
+    "swap": "Swap Usage",
+    "swapDisabled": "Swap disabled",
     "cpuCores": "CPU Cores: ",
     "hostname": "Hostname: ",
     "noData": "No data"

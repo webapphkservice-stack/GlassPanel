@@ -57,6 +57,7 @@
     "firewall": "防火墙",
     "fail2ban": "Fail2ban",
     "ssl": "SSL",
+    "security": "安全",
     "logout": "退出登录",
     "version": "版本",
     "editPanelName": "修改面板名称",
@@ -166,6 +167,9 @@
     "serviceStatus": "核心服务状态",
     "envInfo": "环境信息",
     "os": "操作系统：",
+    "kernel": "内核：",
+    "swap": "Swap 使用",
+    "swapDisabled": "未启用 Swap",
     "cpuCores": "CPU 核心：",
     "hostname": "主机名：",
     "noData": "无数据"

@@ -4,7 +4,7 @@ import { getSystemInfo, getServiceStatuses } from '@/api/system';
 import GlassCard from '@/components/common/GlassCard';
 import StatusBadge from '@/components/common/StatusBadge';
 import EmptyState from '@/components/common/EmptyState';
-import { Cpu, Database, HardDrive, Clock, Activity, Network, ArrowUp, ArrowDown } from '@/components/common/Icons';
+import { Cpu, Database, HardDrive, Clock, Activity, Network, ArrowUp, ArrowDown, Layers } from '@/components/common/Icons';
 import { formatUptime, formatBytesSize, formatSpeed } from '@/utils/format';
 
 function StatCard({ icon: Icon, label, value, subtext }) {
@@ -76,7 +76,7 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-5">
         <StatCard
           icon={Cpu}
           label={t('dashboard.cpuUsage')}
@@ -88,6 +88,16 @@ export default function Dashboard() {
           label={t('dashboard.memoryUsage')}
           value={`${info?.memory?.percent ?? 0}%`}
           subtext={`${info?.memory?.used ?? 0} / ${info?.memory?.total ?? 0} GB`}
+        />
+        <StatCard
+          icon={Layers}
+          label={t('dashboard.swap')}
+          value={info?.swap?.enabled ? `${info.swap.percent}%` : '--'}
+          subtext={
+            info?.swap?.enabled
+              ? `${info.swap.used} / ${info.swap.total} GB`
+              : t('dashboard.swapDisabled')
+          }
         />
         <StatCard
           icon={HardDrive}
@@ -151,12 +161,23 @@ export default function Dashboard() {
         </div>
         <div className="mt-4">
           <div className="grid gap-2 md:grid-cols-4">
-            {(info?.cpus || []).map((cpu, idx) => (
-              <div key={idx} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs">
-                <span className="text-white/50">{t('dashboard.core')} {idx + 1}</span>
-                <span className="ml-2 text-white/70">{cpu.speed ? `${cpu.speed} MHz` : '--'}</span>
-              </div>
-            ))}
+            {(info?.cpus || []).map((cpu, idx) => {
+              const usage = info?.cpu?.cores?.[idx] ?? 0;
+              return (
+                <div key={idx} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-white/50">{t('dashboard.core')} {idx + 1}</span>
+                    <span className="font-mono text-cyan-300">{usage}%</span>
+                  </div>
+                  <div className="mt-2 h-1.5 rounded-full bg-white/10">
+                    <div
+                      className="h-1.5 rounded-full bg-gradient-to-r from-cyan-400 to-cyan-500"
+                      style={{ width: `${Math.min(usage, 100)}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       </GlassCard>
@@ -198,10 +219,14 @@ export default function Dashboard() {
 
       <GlassCard>
         <h2 className="mb-2 text-lg font-semibold">{t('dashboard.envInfo')}</h2>
-        <div className="grid gap-4 text-sm text-white/70 md:grid-cols-3">
-          <div>
+        <div className="grid gap-4 text-sm text-white/70 md:grid-cols-2 lg:grid-cols-4">
+          <div className="break-words">
             <span className="text-white/50">{t('dashboard.os')}</span>
-            {info?.platform} {info?.arch}
+            {info?.osName || `${info?.platform} ${info?.arch}`}
+          </div>
+          <div>
+            <span className="text-white/50">{t('dashboard.kernel')}</span>
+            {info?.kernel || '--'}
           </div>
           <div>
             <span className="text-white/50">{t('dashboard.cpuCores')}</span>

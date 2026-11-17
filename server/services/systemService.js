@@ -23,14 +23,12 @@ function readProcCpuSpeeds() {
 }
 
 function readSysfsCpuSpeed(index) {
-  const files = ['cpufreq/scaling_cur_freq', 'cpufreq/cpuinfo_max_freq'];
-  for (const file of files) {
-    try {
-      const khz = parseInt(fs.readFileSync(`/sys/devices/system/cpu/cpu${index}/${file}`, 'utf8').trim(), 10);
-      if (khz > 0) return Math.round(khz / 1000);
-    } catch (err) {
-      // 该核心无 cpufreq 信息，继续尝试下一个来源
-    }
+  // scaling_cur_freq 是内核报告的当前运行频率（kHz），仅此一项代表实时值
+  try {
+    const khz = parseInt(fs.readFileSync(`/sys/devices/system/cpu/cpu${index}/cpufreq/scaling_cur_freq`, 'utf8').trim(), 10);
+    if (khz > 0) return Math.round(khz / 1000);
+  } catch (err) {
+    // 该核心无 cpufreq 信息，继续尝试其他来源
   }
   return 0;
 }
@@ -45,10 +43,12 @@ function resolveCpuSpeeds(cpus) {
   const procSpeeds = readProcCpuSpeeds();
   const fallback = procSpeeds.find((s) => s > 0) || modelSpeedMHz(cpus[0]?.model);
   return cpus.map((cpu, idx) => {
-    if (cpu.speed > 0) return cpu.speed;
-    if (procSpeeds[idx] > 0) return procSpeeds[idx];
+    // 优先实时频率（cpufreq），其次内核当前报告值，最后才用 os 采样值/标称值
     const sysfs = readSysfsCpuSpeed(idx);
-    return sysfs > 0 ? sysfs : fallback;
+    if (sysfs > 0) return sysfs;
+    if (procSpeeds[idx] > 0) return procSpeeds[idx];
+    if (cpu.speed > 0) return cpu.speed;
+    return fallback;
   });
 }
 
@@ -92,6 +92,41 @@ async function getNetworkStats() {
   };
 }
 
+// ---- Swap：/proc/meminfo 的 SwapTotal / SwapFree（单位 kB）----
+function readSwapInfo() {
+  try {
+    const content = fs.readFileSync('/proc/meminfo', 'utf8');
+    const get = (key) => {
+      const m = content.match(new RegExp(`^${key}:\\s+(\\d+) kB`, 'm'));
+      return m ? parseInt(m[1], 10) * 1024 : 0; // kB → B
+    };
+    const total = get('SwapTotal');
+    const free = get('SwapFree');
+    if (total <= 0) return { enabled: false, total: '0', used: '0', free: '0', percent: 0 };
+    const used = Math.max(total - free, 0);
+    return {
+      enabled: true,
+      total: bytesToGB(total),
+      used: bytesToGB(used),
+      free: bytesToGB(free),
+      percent: Math.round((used / total) * 100),
+    };
+  } catch (err) {
+    return { enabled: false, total: '0', used: '0', free: '0', percent: 0 };
+  }
+}
+
+// ---- 操作系统：/etc/os-release 的 PRETTY_NAME（如 Alibaba Cloud Linux 3.2104）----
+function readOsName() {
+  try {
+    const content = fs.readFileSync('/etc/os-release', 'utf8');
+    const m = content.match(/^PRETTY_NAME="?([^"\n]+)"?/m);
+    return m ? m[1].trim() : '';
+  } catch (err) {
+    return '';
+  }
+}
+
 async function getSystemInfo() {
   const totalMem = os.totalmem();
   const freeMem = os.freemem();
@@ -117,6 +152,9 @@ async function getSystemInfo() {
       free: bytesToGB(freeMem),
       percent: Math.round((usedMem / totalMem) * 100),
     },
+    swap: readSwapInfo(),
+    osName: readOsName(),
+    kernel: os.release(),
     disk: [],
   };
 
@@ -143,7 +181,7 @@ async function getSystemInfo() {
 }
 
 async function getCpuUsage() {
-  // 简单采样计算 CPU 使用率
+  // 两次采样计算总使用率与各核心使用率
   const getTimes = () => os.cpus().map((cpu) => cpu.times);
   const start = getTimes();
   await new Promise((resolve) => setTimeout(resolve, 500));
@@ -151,17 +189,17 @@ async function getCpuUsage() {
 
   let totalDiff = 0;
   let idleDiff = 0;
-  for (let i = 0; i < start.length; i++) {
-    const s = start[i];
-    const e = end[i];
-    const total = Object.keys(e).reduce((acc, key) => acc + (e[key] - s[key]), 0);
-    const idle = e.idle - s.idle;
+  const cores = start.map((s, i) => {
+    const e = end[i] || {};
+    const total = Object.keys(e).reduce((acc, key) => acc + Math.max((e[key] || 0) - (s[key] || 0), 0), 0);
+    const idle = Math.max((e.idle || 0) - (s.idle || 0), 0);
     totalDiff += total;
     idleDiff += idle;
-  }
+    return total === 0 ? 0 : Math.round(((total - idle) / total) * 100);
+  });
 
   const usage = totalDiff === 0 ? 0 : Math.round(((totalDiff - idleDiff) / totalDiff) * 100);
-  return { usage };
+  return { usage, cores };
 }
 
 // 重启面板服务（通过 systemd 优雅重启）
