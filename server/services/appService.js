@@ -63,6 +63,55 @@ function readMarker(key) {
   }
 }
 
+// 应用首次安装时间（毫秒）：源码/pip 应用看版本标记文件的写入时间，
+// 系统包看包管理器记录的安装时间；仅用于应用中心排序。
+function markerInstallTime(key) {
+  const p = INSTALL_MARKERS[key];
+  if (!p) return 0;
+  try {
+    return fs.statSync(p).mtimeMs;
+  } catch (e) {
+    return 0;
+  }
+}
+
+async function getPackageInstallTimes() {
+  const times = new Map();
+  const rpm = await run('rpm', ['-qa', '--qf', '%{NAME}\t%{INSTALLTIME}\n']);
+  if (rpm.exitCode === 0) {
+    for (const line of String(rpm.stdout || '').split('\n')) {
+      const [name, ts] = line.split('\t');
+      if (name && ts) times.set(name.trim(), Number(ts) * 1000);
+    }
+    return times;
+  }
+  // Debian/Ubuntu 的 dpkg 没有安装时间字段，用包清单文件的 mtime 近似
+  for (const app of APPS) {
+    for (const name of [app.package, app.officialPackage]) {
+      if (!name || times.has(name)) continue;
+      try {
+        times.set(name, fs.statSync(`/var/lib/dpkg/info/${name}.list`).mtimeMs);
+      } catch (e) {
+        // 未安装
+      }
+    }
+  }
+  return times;
+}
+
+function withInstallTimes(apps, packageTimes) {
+  for (const app of apps) {
+    if (!app.installed || app.systemUpdate) continue;
+    const meta = APPS.find((x) => x.key === app.key) || {};
+    const candidates = [
+      markerInstallTime(app.key),
+      packageTimes.get(meta.package) || 0,
+      packageTimes.get(meta.officialPackage) || 0,
+    ].filter((t) => t > 0);
+    app.installedAt = candidates.length ? Math.min(...candidates) : 0;
+  }
+}
+
 // 版本号按段数值比较（8.5.11 > 8.5.9）
 function compareVersions(a, b) {
   const pa = String(a).split('.').map((x) => parseInt(x, 10) || 0);
@@ -953,6 +1002,8 @@ dnf module disable php -y >/dev/null 2>&1 || true
 # 构建依赖（幂等）
 dnf -y install dnf-plugins-core >/dev/null 2>&1
 dnf -y groupinstall "Development Tools" "Development Libraries" >/dev/null 2>&1 || true
+# RHEL9 系（AlmaLinux/Rocky/Alibaba Cloud Linux 4）的 oniguruma-devel 位于默认禁用的 CRB 仓库
+dnf config-manager --set-enabled crb >/dev/null 2>&1 || true
 dnf -y install gcc gcc-c++ make autoconf pkgconfig libxml2-devel openssl-devel oniguruma-devel bzip2-devel libcurl-devel libicu-devel sqlite-devel zlib-devel readline-devel file libtool lksctp-tools-devel libpng-devel libjpeg-turbo-devel freetype-devel >/dev/null
 
 tar xzf "php-\${PHP_VERSION}.tar.gz"
@@ -2597,6 +2648,7 @@ async function listApps() {
       jobRunning: jobService.isRunning(app.key),
     });
   }
+  withInstallTimes(apps, await getPackageInstallTimes());
   return { pkg, apps };
 }
 
@@ -2734,9 +2786,20 @@ async function startUpdate(key) {
     const script = `#!/usr/bin/env bash
 set -e
 echo "=== 系统更新（${osVersion()}）==="
-# 先拿到包管理器真实退出码，再执行 daemon-reload 收尾，最后以真实退出码结束
+# 先拿到包管理器真实退出码，再执行 daemon-reload 收尾，最后以真实退出码结束。
+# --skip-broken：第三方源（如 EPEL）与系统源存在个别包的依赖冲突时
+# （alinux3 上 ImageMagick-libs 要求 LibRaw 0.19、系统源已升 0.21），
+# 跳过冲突包继续更新其余软件包，避免单个冲突导致整个事务失败
 UPDATE_RC=0
-${pm} -y --refresh update || UPDATE_RC=$?
+${pm} -y --refresh --skip-broken update || UPDATE_RC=$?
+if [ "$UPDATE_RC" -ne 0 ]; then
+  # EPEL 与系统源存在「最佳候选」类冲突时（alinux3 上 ImageMagick-libs 依赖
+  # libraw_r.so.19，而系统源已把 LibRaw 升到 0.21），--skip-broken 不生效，
+  # 需用 --nobest 允许冲突包本次暂不升级，其余软件包照常更新
+  echo "[面板] 存在依赖冲突（--skip-broken 未解决），改用 --nobest 允许冲突包暂不升级"
+  UPDATE_RC=0
+  ${pm} -y --refresh --nobest update || UPDATE_RC=$?
+fi
 echo "=== 系统更新结束（${pm} 退出码 \${UPDATE_RC}）==="
 # 升级 systemd / dbus / rpm 时，事务内 rpm scriptlet 常报
 # "Reload daemon failed: Transport endpoint is not connected"（daemon 正被替换，时序性报错）。
