@@ -48,6 +48,11 @@ const INSTALL_MARKERS = {
 };
 const PHP_COMPILE_MARKER = INSTALL_MARKERS.php;
 
+// 系统更新时因依赖冲突被 --skip-broken / --nobest 跳过的包（格式：包名 候选版本）。
+// 更新检查不再把它们计入可用更新，避免「点了更新仍有更新」的死循环；
+// 上游发布新版本后版本号变化，会重新计入
+const SYSTEM_UPDATE_SKIP_FILE = '/opt/glass-panel/data/system-update-skip';
+
 // 源码编译目标版本（如 php 8.5 → 8.5.12）：供更新检查与既定安全补丁基线对齐
 function getSourceBuildVersion(key, release) {
   return (SOURCE_BUILD[key] || {})[release] || '';
@@ -2237,16 +2242,35 @@ function osVersion() {
   }
 }
 
+// 读取系统更新跳过清单：包名 → 上次更新时无法升级的候选版本
+function readSystemUpdateSkip() {
+  try {
+    const out = {};
+    for (const line of fs.readFileSync(SYSTEM_UPDATE_SKIP_FILE, 'utf8').split('\n')) {
+      const [name, ver] = line.trim().split(/\s+/);
+      if (name && ver) out[name] = ver;
+    }
+    return out;
+  } catch (e) {
+    return {};
+  }
+}
+
 // 查询系统可用更新（dnf check-update：0=无更新，100=有更新，其他=失败）
 async function checkSystemUpdates() {
   const pm = detectPkgManager();
   if (pm !== 'dnf' && pm !== 'yum') return { count: -1, packages: [] };
   const result = await run(pm, ['-q', 'check-update'], { timeout: 120000 });
+  // 内核已升级未重启时 check-update 会输出 "Security: ..." 提示行（是重启提醒，
+  // 不是可用更新）；因依赖冲突被跳过的包命中跳过清单时同样不计入
+  const skip = readSystemUpdateSkip();
   const packages = (result.stdout || '')
     .split('\n')
     .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith('Obsoleting') && l.split(/\s+/).length >= 3)
-    .map((l) => l.split(/\s+/)[0]);
+    .filter((l) => l && !l.startsWith('Obsoleting') && !l.startsWith('Security:'))
+    .map((l) => l.split(/\s+/))
+    .filter((c) => c.length >= 3 && skip[c[0]] !== c[1])
+    .map((c) => c[0]);
   if (result.exitCode === 100) return { count: packages.length, packages };
   if (result.exitCode === 0) return { count: 0, packages: [] };
   return { count: -1, packages: [] };
@@ -2815,6 +2839,21 @@ LATEST_KERNEL=$(rpm -q kernel --qf '%{VERSION}-%{RELEASE}.%{ARCH}\\n' 2>/dev/nul
 RUNNING_KERNEL=$(uname -r)
 if [ -n "$LATEST_KERNEL" ] && [ "$LATEST_KERNEL" != "$RUNNING_KERNEL" ]; then
   echo "[面板] 已安装新内核 $LATEST_KERNEL，当前运行 $RUNNING_KERNEL，需重启服务器后生效"
+fi
+# 更新成功后，把 check-update 仍列出的包记录为跳过清单（依赖冲突暂无法升级，
+# 下次检查不再计入可用更新；上游发布新版本后版本号变化会重新计入）
+if [ "$UPDATE_RC" -eq 0 ]; then
+  SKIP_TMP="/opt/glass-panel/data/.system-update-skip.tmp"
+  mkdir -p /opt/glass-panel/data
+  ${pm} -q check-update 2>/dev/null | awk 'NF && $1 != "Obsoleting" && $1 != "Security:" && NF >= 3 { print $1 " " $2 }' > "$SKIP_TMP" || true
+  if [ -s "$SKIP_TMP" ]; then
+    mv "$SKIP_TMP" ${SYSTEM_UPDATE_SKIP_FILE}
+    echo "[面板] 以下包因依赖冲突本次暂无法升级，已从可用更新计数中排除（上游发新版后会重新提醒）："
+    sed 's/^/    /' ${SYSTEM_UPDATE_SKIP_FILE}
+  else
+    rm -f "$SKIP_TMP" ${SYSTEM_UPDATE_SKIP_FILE}
+    echo "[面板] 无残留未升级包"
+  fi
 fi
 if [ "$UPDATE_RC" -ne 0 ]; then
   echo "[面板] ${pm} 返回非 0 退出码 $UPDATE_RC，请核对上方输出"
