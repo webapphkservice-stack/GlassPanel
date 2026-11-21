@@ -53,6 +53,43 @@ const PHP_COMPILE_MARKER = INSTALL_MARKERS.php;
 // 上游发布新版本后版本号变化，会重新计入
 const SYSTEM_UPDATE_SKIP_FILE = '/opt/glass-panel/data/system-update-skip';
 
+// 用户选择「忽略本次更新」的记录（应用 key → 忽略的版本号）。
+// 忽略后卡片隐藏该版本的升级提醒；上游发布更高版本号后会重新提醒
+const IGNORED_UPDATES_FILE = '/opt/glass-panel/data/ignored-updates.json';
+
+function readIgnoredUpdates() {
+  try {
+    return JSON.parse(fs.readFileSync(IGNORED_UPDATES_FILE, 'utf8')) || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function writeIgnoredUpdates(map) {
+  fs.mkdirSync(path.dirname(IGNORED_UPDATES_FILE), { recursive: true });
+  fs.writeFileSync(IGNORED_UPDATES_FILE, JSON.stringify(map, null, 2), 'utf8');
+}
+
+function ignoreAppUpdate(key, version) {
+  const map = readIgnoredUpdates();
+  map[key] = String(version);
+  writeIgnoredUpdates(map);
+}
+
+function resumeAppUpdate(key) {
+  const map = readIgnoredUpdates();
+  delete map[key];
+  writeIgnoredUpdates(map);
+}
+
+// 命中忽略记录时隐藏升级提醒，并附带 ignoredVersion 供前端显示「已忽略」状态
+function applyIgnoredUpdate(item, latestVersion) {
+  if (item.updateAvailable && latestVersion && readIgnoredUpdates()[item.key] === String(latestVersion)) {
+    item.updateAvailable = false;
+    item.ignoredVersion = latestVersion;
+  }
+}
+
 // 源码编译目标版本（如 php 8.5 → 8.5.12）：供更新检查与既定安全补丁基线对齐
 function getSourceBuildVersion(key, release) {
   return (SOURCE_BUILD[key] || {})[release] || '';
@@ -2584,7 +2621,7 @@ async function listApps() {
       const openUrl = gateway && gateway.domain
         ? `${gateway.scheme || 'https'}://${gateway.domain}${basePath}/`
         : (installed && accessHost ? `http://${accessHost}/` : '');
-      apps.push({
+      const item = {
         key: app.key,
         name: app.name,
         desc: app.desc,
@@ -2600,7 +2637,9 @@ async function listApps() {
         jobRunning: jobService.isRunning(app.key),
         port: installed ? xuiPort : undefined,
         openUrl,
-      });
+      };
+      applyIgnoredUpdate(item, latestVersion);
+      apps.push(item);
       continue;
     }
 
@@ -2619,7 +2658,7 @@ async function listApps() {
           // 网络异常时不影响卡片展示
         }
       }
-      apps.push({
+      const item = {
         key: app.key,
         name: app.name,
         desc: app.desc,
@@ -2634,7 +2673,9 @@ async function listApps() {
         latestVersion: updateAvailable ? latestVersion : '',
         jobRunning: jobService.isRunning(app.key),
         runtimePath: marker ? `${NODEJS_ROOT}/current/bin/node` : '',
-      });
+      };
+      applyIgnoredUpdate(item, latestVersion);
+      apps.push(item);
       continue;
     }
 
@@ -2671,7 +2712,7 @@ async function listApps() {
       const updateAvailable = !!target && compareVersions(target, marker) > 0;
       const installed = versions.length > 0;
       const running = versions.some((v) => v.status === 'active');
-      apps.push({
+      const item = {
         key: app.key,
         name: app.name,
         desc: app.desc,
@@ -2686,7 +2727,9 @@ async function listApps() {
         latestVersion: updateAvailable ? target : '',
         jobRunning: jobService.isRunning(app.key),
         multiVersion: true,
-      });
+      };
+      applyIgnoredUpdate(item, target);
+      apps.push(item);
       continue;
     }
 
@@ -2714,7 +2757,7 @@ async function listApps() {
     // 源码编译/pip 安装且配置了更高版本 → 面板内可更新
     const target = marker ? latestTargetVersion(app.key, marker) : '';
     const updateAvailable = !!target && compareVersions(target, marker) > 0;
-    apps.push({
+    const item = {
       key: app.key,
       name: app.name,
       desc: app.desc,
@@ -2729,7 +2772,9 @@ async function listApps() {
       latestVersion: updateAvailable ? target : '',
       // 后台任务状态（页面刷新后可据此恢复「安装中」与终端入口）
       jobRunning: jobService.isRunning(app.key),
-    });
+    };
+    applyIgnoredUpdate(item, target);
+    apps.push(item);
   }
   withInstallTimes(apps, await getPackageInstallTimes());
   return { pkg, apps };
@@ -3111,6 +3156,8 @@ module.exports = {
   startPhpUpdate,
   getSourceBuildVersion,
   startUninstall,
+  ignoreAppUpdate,
+  resumeAppUpdate,
   getJob,
   getRunningJobs,
   sync3xuiPackage,

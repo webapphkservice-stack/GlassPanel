@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { getApps, getAppVersions, installApp, updateApp, uninstallApp, getAppJob, syncXui, syncXuiLatest } from '@/api/apps';
+import { getApps, getAppVersions, installApp, updateApp, uninstallApp, getAppJob, syncXui, syncXuiLatest, ignoreAppUpdate, resumeAppUpdate } from '@/api/apps';
 import { getNginxSites } from '@/api/nginx';
 import { getCertificates } from '@/api/ssl';
 import GlassCard from '@/components/common/GlassCard';
@@ -263,6 +263,27 @@ export default function Apps() {
     await launch(updateApp(app.key), app.key);
   }
 
+  // 忽略当前版本的升级提醒：卡片不再显示「更新」，新版本发布后自动重新提醒
+  async function handleIgnoreUpdate(app) {
+    try {
+      await ignoreAppUpdate(app.key, app.latestVersion);
+      toast(t('apps.ignoreSuccess', { version: app.latestVersion }), 'success');
+      fetchData();
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    }
+  }
+
+  // 恢复被忽略的升级提醒
+  async function handleResumeUpdate(app) {
+    try {
+      await resumeAppUpdate(app.key);
+      fetchData();
+    } catch (err) {
+      toast(err?.message || String(err), 'error');
+    }
+  }
+
   // 系统更新：升级发行版全部软件包（可能包含内核，需重启生效）
   async function handleSystemUpdate(app) {
     const ok = await uiConfirm({
@@ -356,6 +377,15 @@ export default function Apps() {
                     {app.updateAvailable && !app.systemUpdate && (
                       <span className="ml-1 text-amber-300">{t('apps.updateAvailable', { version: app.latestVersion })}</span>
                     )}
+                    {app.ignoredVersion && !app.updateAvailable && (
+                      <button
+                        type="button"
+                        onClick={() => handleResumeUpdate(app)}
+                        className="ml-2 text-white/40 underline underline-offset-2 hover:text-white/70"
+                      >
+                        {t('apps.ignoredNotice', { version: app.ignoredVersion })}
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -390,11 +420,18 @@ export default function Apps() {
                       </a>
                     )}
                     {app.updateAvailable && app.canManage !== false && (
-                      <div className="flex-1 basis-[calc(50%-0.25rem)]">
-                        <LiquidButton size="sm" onClick={() => handleUpdate(app)} disabled={!!startingKey} className="w-full justify-center">
-                          <RefreshCw className="w-4 h-4" /> {t('common.update')}
-                        </LiquidButton>
-                      </div>
+                      <>
+                        <div className="flex-1 basis-[calc(50%-0.25rem)]">
+                          <LiquidButton size="sm" onClick={() => handleUpdate(app)} disabled={!!startingKey} className="w-full justify-center">
+                            <RefreshCw className="w-4 h-4" /> {t('common.update')}
+                          </LiquidButton>
+                        </div>
+                        <div className="flex-1 basis-[calc(50%-0.25rem)]">
+                          <LiquidButton size="sm" onClick={() => handleIgnoreUpdate(app)} disabled={!!startingKey} variant="ghost" className="w-full justify-center">
+                            {t('apps.ignoreUpdate')}
+                          </LiquidButton>
+                        </div>
+                      </>
                     )}
                     {app.canManage !== false && (
                       <div className="flex-1 basis-[calc(50%-0.25rem)]">

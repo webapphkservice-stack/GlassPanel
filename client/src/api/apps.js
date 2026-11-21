@@ -6,6 +6,8 @@ export const getAppVersions = (key) => request.get(`/apps/versions/${key}`);
 export const installApp = (key, version = '', config = {}) => request.post(`/apps/install/${key}`, { version, config });
 export const updateApp = (key) => request.post(`/apps/update/${key}`, {});
 export const uninstallApp = (key) => request.post(`/apps/uninstall/${key}`);
+export const ignoreAppUpdate = (key, version) => request.post(`/apps/ignore-update/${key}`, { version });
+export const resumeAppUpdate = (key) => request.post(`/apps/resume-update/${key}`, {});
 export const getAppJob = (key) => request.get(`/apps/job/${key}`);
 export const syncXui = (version) => request.post('/apps/sync-xui', { version });
 export const syncXuiLatest = () => request.post('/apps/sync-xui-latest', {});
