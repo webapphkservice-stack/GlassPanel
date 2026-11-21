@@ -902,6 +902,10 @@ function latestTargetVersion(key, installed) {
   if (source) return source;
   const pip = (PIP_INSTALL[key] || {})[release];
   if (pip) return pip.split('==')[1] || '';
+  // 已装版本不在面板管理的版本线内（如系统里手动安装的 ffmpeg 6.1）：
+  // 回退到面板提供的最新版本，卡片显示「可升级」，更新即跨版本升级
+  const builds = SOURCE_BUILD[key] ? Object.values(SOURCE_BUILD[key]) : [];
+  if (builds.length) return builds.sort(compareVersions).pop();
   return '';
 }
 
