@@ -991,6 +991,9 @@ WORK="${workDir}"
 trap 'echo "[面板] 编译失败，清理构建目录以便重试"; rm -rf "$WORK"' ERR
 mkdir -p "\${WORK}"
 cd "\${WORK}"
+${buildMemGuardLines().join('\n')}
+# 编译全程（含 dnf 装依赖）受内存护栏保护；退出时释放临时 swap
+trap 'cleanup_build_swap' EXIT
 
 ${oldPatchCleanup}if [ ! -f "php-\${PHP_VERSION}.tar.gz" ]; then
   if ! curl -fSL -o "php-\${PHP_VERSION}.tar.gz" "https://www.php.net/distributions/php-\${PHP_VERSION}.tar.gz"; then
@@ -1025,11 +1028,9 @@ ${needFcommon ? 'export CFLAGS="-O2 -fcommon"' : ''}
 fi
 
 if [ ! -f "\${PREFIX}/bin/php" ]; then
-${buildMemGuardLines().join('\n')}
-  make -j"\$JOBS" || { cleanup_build_swap; exit 1; }
+  make -j"\$JOBS"
   make install
 fi
-cleanup_build_swap
 
 mkdir -p "\${PREFIX}/etc/conf.d"
 if [ ! -f "\${PREFIX}/etc/php.ini" ]; then
@@ -1927,6 +1928,8 @@ PREFIX="${prefix}"
 WORK="/opt/redisbuild"
 mkdir -p "\${WORK}"
 cd "\${WORK}"
+${buildMemGuardLines().join('\n')}
+trap 'cleanup_build_swap' EXIT
 if [ ! -f "redis-\${VERSION}.tar.gz" ]; then
   curl -fSL -o "redis-\${VERSION}.tar.gz" "https://download.redis.io/releases/redis-\${VERSION}.tar.gz"
 fi
@@ -1934,11 +1937,9 @@ dnf -y install gcc gcc-c++ make >/dev/null
 tar xzf "redis-\${VERSION}.tar.gz"
 cd "redis-\${VERSION}"
 if [ ! -f "\${PREFIX}/bin/redis-server" ]; then
-${buildMemGuardLines().join('\n')}
-  make -j"\$JOBS" MALLOC=libc || { cleanup_build_swap; exit 1; }
+  make -j"\$JOBS" MALLOC=libc
   make PREFIX="\${PREFIX}" install
 fi
-cleanup_build_swap
 
 mkdir -p "${confDir}" "${dataDir}" "${logDir}"
 if [ ! -f "${confDir}/redis.conf" ]; then
@@ -1983,8 +1984,8 @@ echo "=== BUILD OK: Redis \${VERSION} → \${PREFIX} (端口 ${port}) ==="
 // 编译任务内存护栏：小内存机器常驻服务占满内存时，gcc 会被 OOM killer 杀掉
 // （"Killed signal terminated program cc1"）。编译前检测可用内存（含 swap），
 // 不足 2.5G 时自动临时扩 4G swap，并把 make 并发压到按内存估算的安全值。
-// 返回的行包含 JOBS 变量、cleanup_build_swap 函数；make 失败或结束时需调用
-// cleanup_build_swap 释放临时 swap（未清理时下次运行会自动接管并释放）
+// 返回的行包含 JOBS 变量、cleanup_build_swap 函数；配合脚本内的
+// trap 'cleanup_build_swap' EXIT 使用，编译结束或中断时自动释放临时 swap
 function buildMemGuardLines() {
   return [
     'AVAIL_TOTAL_MB=$(free -m | awk \'/^Mem:/{a=$7}/^Swap:/{s=$4}END{print a+s}\')',
@@ -2029,6 +2030,8 @@ PREFIX="${prefix}"
 WORK="/opt/ffmpegbuild"
 mkdir -p "\${WORK}"
 cd "\${WORK}"
+${buildMemGuardLines().join('\n')}
+trap 'cleanup_build_swap' EXIT
 if [ ! -f "ffmpeg-\${VERSION}.tar.xz" ]; then
   curl -fSL -o "ffmpeg-\${VERSION}.tar.xz" "https://ffmpeg.org/releases/ffmpeg-\${VERSION}.tar.xz"
 fi
@@ -2042,11 +2045,9 @@ tar xf "ffmpeg-\${VERSION}.tar.xz"
 cd "ffmpeg-\${VERSION}"
 if [ ! -f "\${PREFIX}/bin/ffmpeg" ]; then
   ./configure --prefix="\${PREFIX}" --disable-doc \${EXTRA}
-${buildMemGuardLines().join('\n')}
-  make -j"\$JOBS" || { cleanup_build_swap; exit 1; }
+  make -j"\$JOBS"
   make install
 fi
-cleanup_build_swap
 ln -sf "\${PREFIX}/bin/ffmpeg" /usr/local/bin/ffmpeg
 ln -sf "\${PREFIX}/bin/ffprobe" /usr/local/bin/ffprobe
 
