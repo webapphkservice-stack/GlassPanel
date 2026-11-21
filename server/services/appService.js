@@ -2687,7 +2687,7 @@ async function listApps() {
     }
 
     // 源码编译安装的软件走独立 systemd 服务（php → php-fpm-8.5，redis → redis-8.0）
-    const marker = readMarker(app.key);
+    let marker = readMarker(app.key);
     const service = (marker && compiledServiceName(app.key, marker)) || app.service;
     const statusSource = service
       ? getServiceStatus(service)
@@ -2699,6 +2699,12 @@ async function listApps() {
       getInstalledVersion(app.key),
       isPackageInstalled([app.package, app.officialPackage]),
     ]);
+    // 系统中存在可运行的二进制但没有安装标记（手动安装/卸载中断的残留）：
+    // 补写标记让「更新 / 卸载」入口可用，卡片状态与实际一致（当前仅 ffmpeg）
+    if (!marker && version && /^\d+(\.\d+)+$/.test(version) && app.binaryCheck) {
+      writeMarker(app.key, version);
+      marker = version;
+    }
     // 源码编译 / pip 安装的软件没有 rpm 记录，以版本标记文件为准
     const installed = !!marker || pkgInstalled;
     // 源码编译/pip 安装且配置了更高版本 → 面板内可更新
