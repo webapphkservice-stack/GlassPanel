@@ -1025,9 +1025,11 @@ ${needFcommon ? 'export CFLAGS="-O2 -fcommon"' : ''}
 fi
 
 if [ ! -f "\${PREFIX}/bin/php" ]; then
-  make -j"\$(nproc)"
+${buildMemGuardLines().join('\n')}
+  make -j"\$JOBS" || { cleanup_build_swap; exit 1; }
   make install
 fi
+cleanup_build_swap
 
 mkdir -p "\${PREFIX}/etc/conf.d"
 if [ ! -f "\${PREFIX}/etc/php.ini" ]; then
@@ -1932,9 +1934,11 @@ dnf -y install gcc gcc-c++ make >/dev/null
 tar xzf "redis-\${VERSION}.tar.gz"
 cd "redis-\${VERSION}"
 if [ ! -f "\${PREFIX}/bin/redis-server" ]; then
-  make -j"\$(nproc)" MALLOC=libc
+${buildMemGuardLines().join('\n')}
+  make -j"\$JOBS" MALLOC=libc || { cleanup_build_swap; exit 1; }
   make PREFIX="\${PREFIX}" install
 fi
+cleanup_build_swap
 
 mkdir -p "${confDir}" "${dataDir}" "${logDir}"
 if [ ! -f "${confDir}/redis.conf" ]; then
@@ -1976,6 +1980,46 @@ echo "=== BUILD OK: Redis \${VERSION} → \${PREFIX} (端口 ${port}) ==="
 }
 
 // 生成 FFmpeg 源码编译安装脚本（官方只提供源码包）
+// 编译任务内存护栏：小内存机器常驻服务占满内存时，gcc 会被 OOM killer 杀掉
+// （"Killed signal terminated program cc1"）。编译前检测可用内存（含 swap），
+// 不足 2.5G 时自动临时扩 4G swap，并把 make 并发压到按内存估算的安全值。
+// 返回的行包含 JOBS 变量、cleanup_build_swap 函数；make 失败或结束时需调用
+// cleanup_build_swap 释放临时 swap（未清理时下次运行会自动接管并释放）
+function buildMemGuardLines() {
+  return [
+    'AVAIL_TOTAL_MB=$(free -m | awk \'/^Mem:/{a=$7}/^Swap:/{s=$4}END{print a+s}\')',
+    'JOBS=$(( AVAIL_TOTAL_MB / 900 ))',
+    '[ "$JOBS" -lt 1 ] && JOBS=1',
+    'NCPU=$(nproc 2>/dev/null || echo 1)',
+    '[ "$JOBS" -gt "$NCPU" ] && JOBS=$NCPU',
+    'BUILD_SWAP=""',
+    'if [ "$AVAIL_TOTAL_MB" -lt 2500 ]; then',
+    '  for f in /opt/glass-panel-swapbuild /tmp/glass-panel-swapbuild; do',
+    '    [ -d "${f%/*}" ] || continue',
+    '    # 上次编译中断留下的临时 swap 直接接管，结束时统一释放',
+    '    if swapon --show=NAME --noheadings 2>/dev/null | grep -qxF "$f"; then BUILD_SWAP="$f"; break; fi',
+    '    echo "[面板] 可用内存不足（${AVAIL_TOTAL_MB}MB），临时增加 4G swap 用于编译"',
+    '    if ! fallocate -l 4G "$f" 2>/dev/null; then dd if=/dev/zero of="$f" bs=1M count=4096 status=none; fi',
+    '    if chmod 600 "$f" && mkswap "$f" >/dev/null 2>&1 && swapon "$f" 2>/dev/null; then',
+    '      BUILD_SWAP="$f"',
+    '      AVAIL_TOTAL_MB=$(free -m | awk \'/^Mem:/{a=$7}/^Swap:/{s=$4}END{print a+s}\')',
+    '      JOBS=$(( AVAIL_TOTAL_MB / 900 ))',
+    '      [ "$JOBS" -lt 1 ] && JOBS=1',
+    '      [ "$JOBS" -gt "$NCPU" ] && JOBS=$NCPU',
+    '      break',
+    '    fi',
+    '    rm -f "$f"',
+    '  done',
+    'fi',
+    'echo "[面板] 编译并发：make -j$JOBS（可用内存 ${AVAIL_TOTAL_MB}MB / ${NCPU} 核）"',
+    'cleanup_build_swap() {',
+    '  if [ -n "$BUILD_SWAP" ]; then',
+    '    if swapoff "$BUILD_SWAP" 2>/dev/null; then rm -f "$BUILD_SWAP"; echo "[面板] 临时 swap 已释放"; fi',
+    '  fi',
+    '}',
+  ];
+}
+
 function buildFfmpegCompileScript(version) {
   const prefix = `/usr/local/ffmpeg/${version}`;
   return `#!/usr/bin/env bash
@@ -1992,13 +2036,17 @@ dnf -y install gcc gcc-c++ make nasm yasm pkgconfig xz tar >/dev/null
 # 有 x264/x265 则启用 H.264/H.265 编码，装不上就按基础版编译
 EXTRA=""
 dnf -y install x264-devel libx265-devel >/dev/null 2>&1 && EXTRA="--enable-gpl --enable-libx264 --enable-libx265" || EXTRA=""
+# 每次全新解压：上次编译中断可能残留混合的 .o 文件
+rm -rf "ffmpeg-\${VERSION}"
 tar xf "ffmpeg-\${VERSION}.tar.xz"
 cd "ffmpeg-\${VERSION}"
 if [ ! -f "\${PREFIX}/bin/ffmpeg" ]; then
   ./configure --prefix="\${PREFIX}" --disable-doc \${EXTRA}
-  make -j"\$(nproc)"
+${buildMemGuardLines().join('\n')}
+  make -j"\$JOBS" || { cleanup_build_swap; exit 1; }
   make install
 fi
+cleanup_build_swap
 ln -sf "\${PREFIX}/bin/ffmpeg" /usr/local/bin/ffmpeg
 ln -sf "\${PREFIX}/bin/ffprobe" /usr/local/bin/ffprobe
 
